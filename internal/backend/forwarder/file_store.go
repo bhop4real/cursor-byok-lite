@@ -175,6 +175,10 @@ func (store *ConversationFileStore) AppendEntries(conversationID string, entries
 		}
 		conversation.Mode = alias
 	}
+	entries = filterDuplicatePromptContextEntries(conversation.Entries, entries)
+	if len(entries) == 0 {
+		return cloneConversationFile(conversation), nil, nil
+	}
 	assigned := appendEntriesInPlace(conversation, entries)
 	deriveConversationLoopState(conversation)
 	if err := store.writeConversationLocked(normalizedConversationID, conversation); err != nil {
@@ -225,6 +229,10 @@ func (store *ConversationFileStore) AppendEntriesFromSnapshot(conversationID str
 	}
 	if conversation == nil {
 		conversation = cloneConversationFile(snapshot)
+	}
+	entries = filterDuplicatePromptContextEntries(conversation.Entries, entries)
+	if len(entries) == 0 {
+		return cloneConversationFile(conversation), nil, nil
 	}
 	assigned := appendEntriesInPlace(conversation, entries)
 	deriveConversationLoopState(conversation)

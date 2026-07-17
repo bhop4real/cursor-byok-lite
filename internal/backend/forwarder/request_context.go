@@ -10,6 +10,19 @@ import (
 	"cursor/gen/agentv1"
 )
 
+func requestContextWithTopLevelMCPFileSystemOptions(requestContext *agentv1.RequestContext, options *agentv1.McpFileSystemOptions) *agentv1.RequestContext {
+	if options == nil || requestContext.GetMcpFileSystemOptions() != nil {
+		return requestContext
+	}
+	if requestContext == nil {
+		requestContext = &agentv1.RequestContext{}
+	} else {
+		requestContext = proto.Clone(requestContext).(*agentv1.RequestContext)
+	}
+	requestContext.McpFileSystemOptions = proto.Clone(options).(*agentv1.McpFileSystemOptions)
+	return requestContext
+}
+
 func normalizeRequestContextForStorage(requestContext *agentv1.RequestContext) *agentv1.RequestContext {
 	if requestContext == nil {
 		return nil
@@ -310,45 +323,6 @@ func buildSkillDiscoveryMessage(requestContext *agentv1.RequestContext) string {
 		return ""
 	}
 	return strings.Join(lines, "\n\n")
-}
-
-func collectMCPToolServers(requestContext *agentv1.RequestContext) map[string]string {
-	if requestContext == nil {
-		return nil
-	}
-
-	servers := make(map[string]string)
-	addDescriptors := func(descriptors []*agentv1.McpDescriptor) {
-		for _, descriptor := range descriptors {
-			if descriptor == nil {
-				continue
-			}
-			serverIdentifier := firstNonEmpty(descriptor.GetServerIdentifier(), descriptor.GetServerName())
-			if strings.TrimSpace(serverIdentifier) == "" {
-				continue
-			}
-			for _, tool := range descriptor.GetTools() {
-				if tool == nil {
-					continue
-				}
-				toolName := strings.TrimSpace(tool.GetToolName())
-				if toolName == "" {
-					continue
-				}
-				if _, exists := servers[toolName]; exists {
-					continue
-				}
-				servers[toolName] = strings.TrimSpace(serverIdentifier)
-			}
-		}
-	}
-
-	addDescriptors(requestContext.GetMcpFileSystemOptions().GetMcpDescriptors())
-	addDescriptors(requestContext.GetMcpMetaToolOptions().GetMcpDescriptors())
-	if len(servers) == 0 {
-		return nil
-	}
-	return servers
 }
 
 func escapeSkillPromptXML(value string) string {

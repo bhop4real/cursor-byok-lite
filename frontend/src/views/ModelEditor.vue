@@ -46,7 +46,7 @@ const anthropicThinkingEffortOptions = [
   { label: "中", value: "medium", icon: "icon-[mdi--head-lightbulb-outline]" },
   { label: "高", value: "high", icon: "icon-[mdi--brain]" },
   { label: "极高", value: "xhigh", icon: "icon-[mdi--head-cog-outline]" },
-  { label: "Max", value: "max", icon: "icon-[mdi--brain]" },
+  { label: "最大", value: "max", icon: "icon-[mdi--brain]" },
 ];
 
 const openAIEndpointOptions = [

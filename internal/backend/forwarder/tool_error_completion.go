@@ -64,13 +64,17 @@ func (service *Service) completePreDispatchToolError(
 	if startedToolCall == nil {
 		startedToolCall = buildStartedToolCall(invocation)
 	}
-	if !startedHistoryAppended && startedToolCall != nil {
-		toolCallPayload, err := protojson.Marshal(startedToolCall)
-		if err != nil {
-			return err
+	if !startedHistoryAppended {
+		var toolCallPayload []byte
+		if startedToolCall != nil {
+			encoded, err := protojson.Marshal(startedToolCall)
+			if err != nil {
+				return err
+			}
+			toolCallPayload = encoded
 		}
 		if _, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
-			newToolCallEntryWithProviderMetadata(stream.TurnSeq, stream.RequestID, invocation.CallID, invocation.ToolName, invocation.ReasoningContent, invocation.ReasoningSignature, invocation.ReasoningSignatureSource, invocation.ReasoningProviderItemID, invocation.ReasoningProviderStatus, invocation.ReasoningProviderSummary, invocation.ProviderItemID, invocation.ProviderCallID, invocation.ProviderStatus, toolCallPayload),
+			newToolCallEntryWithProviderMetadata(stream.TurnSeq, stream.RequestID, invocation.CallID, invocation.ToolName, invocation.ArgsJSON, invocation.ReasoningContent, invocation.ReasoningSignature, invocation.ReasoningSignatureSource, invocation.ReasoningProviderItemID, invocation.ReasoningProviderStatus, invocation.ReasoningProviderSummary, invocation.ProviderItemID, invocation.ProviderCallID, invocation.ProviderStatus, toolCallPayload),
 		}); err != nil {
 			return err
 		}

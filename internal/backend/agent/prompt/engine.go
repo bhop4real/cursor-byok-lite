@@ -114,7 +114,11 @@ func NewEngine() *Engine {
 
 // Compile 编译一轮模式化 prompt。
 func (engine *Engine) Compile(input CompileInput) (CompiledPrompt, error) {
-	assetMode, err := mapPromptMode(input.Mode)
+	normalizedMode, err := runtimecore.NormalizeSupportedMode(input.Mode)
+	if err != nil {
+		return CompiledPrompt{}, err
+	}
+	assetMode, err := mapPromptMode(normalizedMode)
 	if err != nil {
 		return CompiledPrompt{}, err
 	}
@@ -172,7 +176,7 @@ func (engine *Engine) Compile(input CompileInput) (CompiledPrompt, error) {
 
 	summary := fmt.Sprintf(
 		"mode=%s messages=%d tools=%d hidden_tools=%d tool_names=%s committed_turns=%d pending=%d external_results=%d",
-		input.Mode.String(),
+		normalizedMode.String(),
 		len(messages),
 		len(tools),
 		len(hiddenToolNames),
@@ -183,7 +187,7 @@ func (engine *Engine) Compile(input CompileInput) (CompiledPrompt, error) {
 	)
 
 	return CompiledPrompt{
-		Mode:     input.Mode,
+		Mode:     normalizedMode,
 		Messages: messages,
 		Tools:    tools,
 		RequestKnobs: map[string]any{
@@ -448,14 +452,21 @@ func buildRequestContextRulesSection(requestContext *agentv1.RequestContext) str
 	return strings.Join(ruleLines, "\n")
 }
 
-// buildRequestContextMCPFileSystemSection 构造 <mcp_file_system> 片段。
+// buildRequestContextMCPFileSystemSection 只渲染当前明确启用的 MCP discovery 通道。
 func buildRequestContextMCPFileSystemSection(requestContext *agentv1.RequestContext) string {
-	if requestContext == nil || requestContext.GetMcpFileSystemOptions() == nil {
+	if requestContext == nil {
 		return ""
 	}
+	sections := make([]string, 0, 2)
+	if options := requestContext.GetMcpMetaToolOptions(); options != nil && options.GetEnabled() {
+		if section := buildRequestContextMCPMetaSection(options.GetMcpDescriptors()); section != "" {
+			sections = append(sections, section)
+		}
+	}
+
 	options := requestContext.GetMcpFileSystemOptions()
-	if !options.GetEnabled() && len(options.GetMcpDescriptors()) == 0 {
-		return ""
+	if options == nil || !options.GetEnabled() || len(options.GetMcpDescriptors()) == 0 {
+		return strings.Join(sections, "\n\n")
 	}
 
 	rootPath := strings.TrimSpace(options.GetWorkspaceProjectDir())
@@ -471,7 +482,7 @@ func buildRequestContextMCPFileSystemSection(requestContext *agentv1.RequestCont
 		}
 	}
 	if rootPath == "" {
-		return ""
+		return strings.Join(sections, "\n\n")
 	}
 	mcpRoot := strings.TrimRight(rootPath, "/") + "/mcps"
 
@@ -481,10 +492,7 @@ func buildRequestContextMCPFileSystemSection(requestContext *agentv1.RequestCont
 		if descriptor == nil {
 			continue
 		}
-		serverID := strings.TrimSpace(descriptor.GetServerIdentifier())
-		if serverID == "" {
-			serverID = strings.TrimSpace(descriptor.GetServerName())
-		}
+		serverID := firstNonEmptyPromptValue(descriptor.GetServerIdentifier(), descriptor.GetServerName())
 		if serverID == "" {
 			continue
 		}
@@ -501,21 +509,63 @@ func buildRequestContextMCPFileSystemSection(requestContext *agentv1.RequestCont
 		descriptorEntries = append(descriptorEntries, buildEmbeddedMCPDescriptorSection(descriptor, serverID, folderPath))
 	}
 	if len(serverEntries) == 0 {
-		return ""
+		return strings.Join(sections, "\n\n")
 	}
 
-	embeddedDescriptors := ""
-	if joined := strings.TrimSpace(strings.Join(filterNonEmptyStrings(descriptorEntries), "\n\n")); joined != "" {
-		embeddedDescriptors = "\n\nEmbedded MCP descriptors:\n\n<mcp_embedded_descriptors>" + joined + "</mcp_embedded_descriptors>"
-	}
-
-	return fmt.Sprintf(
-		"<mcp_file_system>\n\n## MCP Tool Access\n\nYou have access to MCP tools through the MCP FileSystem. Embedded MCP tool descriptors below already satisfy the schema-discovery requirement when present. Only browse descriptor files under %s/<server>/tools/ when a server below does not include the tool you need.\n\n## MCP Resource Access\n\nYou also have access to MCP resources through the MCP FileSystem. Resource descriptors live under %s/<server>/resources/.\n\nAvailable MCP servers:\n\n<mcp_file_system_servers>%s</mcp_file_system_servers>%s\n</mcp_file_system>",
+	embeddedDescriptors := buildEmbeddedMCPDescriptors(descriptorEntries)
+	sections = append(sections, fmt.Sprintf(
+		"<mcp_file_system>\n\n## MCP Tool Access\n\nYou have access to the MCP servers listed for this request. Embedded descriptors below are authoritative for the current request. Only browse descriptor files under %s/<server>/tools/ when an embedded descriptor is unavailable.\n\n## MCP Resource Access\n\nResource descriptors, when provided by a server, live under %s/<server>/resources/.\n\nAvailable MCP servers:\n\n<mcp_file_system_servers>%s</mcp_file_system_servers>%s\n</mcp_file_system>",
 		mcpRoot,
 		mcpRoot,
 		strings.Join(serverEntries, "\n\n"),
 		embeddedDescriptors,
+	))
+	return strings.Join(sections, "\n\n")
+}
+
+func buildRequestContextMCPMetaSection(descriptors []*agentv1.McpDescriptor) string {
+	serverEntries := make([]string, 0, len(descriptors))
+	descriptorEntries := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if descriptor == nil {
+			continue
+		}
+		serverID := firstNonEmptyPromptValue(descriptor.GetServerIdentifier(), descriptor.GetServerName())
+		if serverID == "" {
+			continue
+		}
+		serverEntries = append(serverEntries, fmt.Sprintf(
+			`<mcp_server name="%s">%s</mcp_server>`,
+			escapePromptXML(serverID),
+			escapePromptXML(serverID),
+		))
+		descriptorEntries = append(descriptorEntries, buildEmbeddedMCPDescriptorSection(descriptor, serverID, ""))
+	}
+	if len(serverEntries) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"<mcp_servers>\n\nThe MCP servers and embedded tool descriptors below are enabled for this request. Do not infer servers or tools that are not listed.\n\nAvailable MCP servers:\n\n%s%s\n</mcp_servers>",
+		strings.Join(serverEntries, "\n\n"),
+		buildEmbeddedMCPDescriptors(descriptorEntries),
 	)
+}
+
+func buildEmbeddedMCPDescriptors(entries []string) string {
+	joined := strings.TrimSpace(strings.Join(filterNonEmptyStrings(entries), "\n\n"))
+	if joined == "" {
+		return ""
+	}
+	return "\n\nEmbedded MCP descriptors:\n\n<mcp_embedded_descriptors>" + joined + "</mcp_embedded_descriptors>"
+}
+
+func firstNonEmptyPromptValue(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func buildRequestContextUserIntentSummarySection(requestContext *agentv1.RequestContext) string {

@@ -222,8 +222,12 @@ type PendingExec struct {
 	ModelCallID string
 	// ToolCallID 是与该执行桥关联的工具调用标识。
 	ToolCallID string
-	// ArgsJSON 保存打开该执行桥时的原始参数 JSON，便于恢复 completed ToolCall。
+	// ArgsJSON 保存打开该执行桥时的执行参数 JSON，便于恢复 completed ToolCall。
 	ArgsJSON []byte
+	// VisibleToolName 保存 provider 实际调用的工具名；动态 direct MCP 工具会与执行桥工具名不同。
+	VisibleToolName string
+	// VisibleArgsJSON 保存与 VisibleToolName 对应的 provider 参数，供 checkpoint 和 replay 使用。
+	VisibleArgsJSON []byte
 	// ReasoningContent 保存触发该工具调用时的 thinking 文本，供 checkpoint/replay 续跑复用。
 	ReasoningContent string
 	// ReasoningSignature 保存 provider 对当前 thinking 文本签发的签名。

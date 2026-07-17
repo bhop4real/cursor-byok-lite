@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	modeladapter "cursor/internal/backend/agent/model"
@@ -93,6 +94,52 @@ func collectCurrentTurnPromptContextKeys(conversation *ConversationFile) map[str
 func promptContextKey(context PromptContextMessage) string {
 	context = normalizePromptContextMessage(context)
 	return context.Source + "\x00" + context.ContentHash
+}
+
+func historyPromptContextKey(entry HistoryEntry) (string, bool) {
+	if strings.TrimSpace(entry.Kind) != "prompt_context" || entry.TurnSeq <= 0 {
+		return "", false
+	}
+	var payload promptContextEntryPayload
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+		return "", false
+	}
+	context := normalizePromptContextMessage(PromptContextMessage{
+		Source:      payload.Source,
+		ContentHash: payload.ContentHash,
+		Message: modeladapter.Message{
+			Role:    payload.Role,
+			Content: payload.Content,
+		},
+		Persist: true,
+	})
+	if !isReplayablePromptContext(context) {
+		return "", false
+	}
+	return fmt.Sprintf("%d\x00%s", entry.TurnSeq, promptContextKey(context)), true
+}
+
+func filterDuplicatePromptContextEntries(existing []HistoryEntry, incoming []HistoryEntry) []HistoryEntry {
+	seen := make(map[string]struct{}, len(existing)+len(incoming))
+	for _, entry := range existing {
+		if key, ok := historyPromptContextKey(entry); ok {
+			seen[key] = struct{}{}
+		}
+	}
+	filtered := make([]HistoryEntry, 0, len(incoming))
+	for _, entry := range incoming {
+		key, ok := historyPromptContextKey(entry)
+		if !ok {
+			filtered = append(filtered, entry)
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func isReplayablePromptContext(context PromptContextMessage) bool {

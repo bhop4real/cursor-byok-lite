@@ -1,6 +1,7 @@
 <script setup>
 import CacheHitRateChart from "@/components/charts/CacheHitRateChart.vue";
 import HomeMetricsTrendChart from "@/components/charts/HomeMetricsTrendChart.vue";
+import Select from "@/components/ui/Select.vue";
 import Switch from "@/components/ui/Switch.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
 import { appState, saveIncludeCacheWriteInHitRate } from "@/state/appState";
@@ -95,8 +96,17 @@ const COST_PROFILES = [
   },
 ];
 
+const COST_CONTEXT_TIER_OPTIONS = [
+  { label: "短上下文", value: "short" },
+  { label: "长上下文", value: "long" },
+];
+
 const selectedCostProfileID = ref("claude-opus-4.8");
 const selectedCostContextTier = ref("short");
+
+const costProfileOptions = computed(() =>
+  COST_PROFILES.map((profile) => ({ label: profile.label, value: profile.id })),
+);
 
 const selectedCostProfile = computed(() =>
   COST_PROFILES.find((profile) => profile.id === selectedCostProfileID.value) || COST_PROFILES[0],
@@ -324,25 +334,22 @@ async function toggleIncludeCacheWriteInHitRate(value) {
         </div>
         <div class="flex-1 center-row justify-center gap-2">
           <span class="text-xs text-[#6f6f6f] shrink-0">估算模型</span>
-          <select
-            :value="selectedCostProfileID"
-            class="h-[24px] rounded-[4px] border border-[#3b3b3b] bg-[#1f1f1f] px-1.5 text-[11px] text-[#cfcfcf] outline-none"
+          <Select
+            :model-value="selectedCostProfileID"
+            :options="costProfileOptions"
             aria-label="估算模型"
-            @change="selectCostProfile($event.target.value)"
-          >
-            <option v-for="profile in COST_PROFILES" :key="profile.id" :value="profile.id">
-              {{ profile.label }}
-            </option>
-          </select>
-          <select
+            button-class="!h-[24px] min-w-[150px] !rounded-[4px] !px-2 !text-[11px]"
+            menu-class="text-[11px]"
+            @update:model-value="selectCostProfile"
+          />
+          <Select
             v-if="hasCostContextTiers"
             v-model="selectedCostContextTier"
-            class="h-[24px] rounded-[4px] border border-[#3b3b3b] bg-[#1f1f1f] px-1.5 text-[11px] text-[#cfcfcf] outline-none"
+            :options="COST_CONTEXT_TIER_OPTIONS"
             aria-label="上下文价格"
-          >
-            <option value="short">短上下文</option>
-            <option value="long">长上下文</option>
-          </select>
+            button-class="!h-[24px] min-w-[96px] !rounded-[4px] !px-2 !text-[11px]"
+            menu-class="text-[11px]"
+          />
         </div>
         <div
           class="center-row justify-end shrink-0 gap-2 text-xs text-[#6f6f6f]"
@@ -438,7 +445,7 @@ async function toggleIncludeCacheWriteInHitRate(value) {
               {{ formatCompactInteger(metrics.requestTokensTotal) }}
             </div>
             <div class="mt-3 text-xs leading-5 text-[#8c8c8c]">
-              Prompt
+              提示词
               <span :title="formatInteger(metrics.promptTokensTotal)">
                 {{ formatCompactInteger(metrics.promptTokensTotal) }}
               </span>

@@ -2,6 +2,7 @@
 package forwarder
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"cursor/gen/agentv1"
+	runtimecore "cursor/internal/backend/agent/core"
 	modeladapter "cursor/internal/backend/agent/model"
 	promptengine "cursor/internal/backend/agent/prompt"
 )
@@ -161,13 +163,34 @@ func (projector *HistoryProjector) projectPromptReplay(conversation *Conversatio
 			if err := json.Unmarshal(entry.Payload, &payload); err != nil {
 				return nil, fmt.Errorf("decode tool_call entry: %w", err)
 			}
-			toolCall := &agentv1.ToolCall{}
-			if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
-				return nil, fmt.Errorf("decode tool_call payload: %w", err)
-			}
-			replayMessage, ok := promptengine.BuildAssistantToolCallReplayMessage(payload.ToolCallID, toolCall)
-			if !ok {
-				continue
+			var replayMessage modeladapter.Message
+			if hasStructuredToolCallPayload(payload.ToolCall) {
+				toolCall := &agentv1.ToolCall{}
+				if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
+					return nil, fmt.Errorf("decode tool_call payload: %w", err)
+				}
+				built, ok := promptengine.BuildAssistantToolCallReplayMessage(payload.ToolCallID, toolCall)
+				if !ok {
+					continue
+				}
+				replayMessage = toModelMessage(built)
+			} else {
+				toolCallID := strings.TrimSpace(payload.ToolCallID)
+				toolName := strings.TrimSpace(payload.ToolName)
+				if toolCallID == "" || toolName == "" {
+					continue
+				}
+				replayMessage = modeladapter.Message{
+					Role: "assistant",
+					ToolCalls: []modeladapter.ToolCallDescriptor{{
+						ID:   toolCallID,
+						Type: "function",
+						Function: modeladapter.ToolCallFunctionShape{
+							Name:      toolName,
+							Arguments: firstNonEmpty(strings.TrimSpace(payload.Arguments), "{}"),
+						},
+					}},
+				}
 			}
 			replayMessage.ReasoningContent = payload.ReasoningContent
 			replayMessage.ReasoningSignature = payload.ReasoningSignature
@@ -175,8 +198,12 @@ func (projector *HistoryProjector) projectPromptReplay(conversation *Conversatio
 			replayMessage.OpenAIResponsesReasoningID = payload.ReasoningItemID
 			replayMessage.OpenAIResponsesReasoningStatus = payload.ReasoningStatus
 			replayMessage.OpenAIResponsesReasoningSummary = append(json.RawMessage(nil), payload.ReasoningSummary...)
-			applyPromptProviderMetadataToFirstToolCall(&replayMessage, payload.ProviderItemID, payload.ProviderCallID, payload.ProviderStatus)
-			messages = append(messages, toModelMessage(replayMessage))
+			if len(replayMessage.ToolCalls) > 0 {
+				replayMessage.ToolCalls[0].OpenAIResponsesID = strings.TrimSpace(payload.ProviderItemID)
+				replayMessage.ToolCalls[0].OpenAIResponsesCallID = strings.TrimSpace(payload.ProviderCallID)
+				replayMessage.ToolCalls[0].OpenAIResponsesStatus = strings.TrimSpace(payload.ProviderStatus)
+			}
+			messages = append(messages, replayMessage)
 			if toolCallID := strings.TrimSpace(payload.ToolCallID); toolCallID != "" {
 				toolCallMessageIndexes[toolCallID] = len(messages) - 1
 				seenToolCalls[toolCallID] = struct{}{}
@@ -196,7 +223,7 @@ func (projector *HistoryProjector) projectPromptReplay(conversation *Conversatio
 					delete(toolCallMessageIndexes, toolCallID)
 				}
 				var toolCall *agentv1.ToolCall
-				if len(payload.ToolCall) > 0 {
+				if hasStructuredToolCallPayload(payload.ToolCall) {
 					decoded := &agentv1.ToolCall{}
 					if err := protojson.Unmarshal(payload.ToolCall, decoded); err == nil {
 						toolCall = decoded
@@ -209,7 +236,7 @@ func (projector *HistoryProjector) projectPromptReplay(conversation *Conversatio
 				if toolCallID == "" || toolName == "" {
 					continue
 				}
-				if isLegacyPlainWriteReplay(toolName, len(payload.ToolCall) > 0) {
+				if isLegacyPlainWriteReplay(toolName, hasStructuredToolCallPayload(payload.ToolCall)) {
 					continue
 				}
 				if toolCall != nil {
@@ -229,7 +256,7 @@ func (projector *HistoryProjector) projectPromptReplay(conversation *Conversatio
 				})
 				continue
 			}
-			if len(payload.ToolCall) > 0 {
+			if hasStructuredToolCallPayload(payload.ToolCall) {
 				toolCall := &agentv1.ToolCall{}
 				if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
 					return nil, fmt.Errorf("decode tool_result tool_call entry: %w", err)
@@ -263,7 +290,7 @@ func (projector *HistoryProjector) projectPromptReplay(conversation *Conversatio
 			if strings.TrimSpace(payload.ToolCallID) == "" || strings.TrimSpace(payload.ToolName) == "" {
 				continue
 			}
-			if isLegacyPlainWriteReplay(strings.TrimSpace(payload.ToolName), len(payload.ToolCall) > 0) {
+			if isLegacyPlainWriteReplay(strings.TrimSpace(payload.ToolName), hasStructuredToolCallPayload(payload.ToolCall)) {
 				continue
 			}
 			if !hasReplayableReasoningPayload(payload.ReasoningContent, payload.ReasoningSignature, payload.ReasoningSignatureSource) {
@@ -480,12 +507,17 @@ func sanitizeCanceledReplayEntries(entries []HistoryEntry) []HistoryEntry {
 	for _, entry := range entries {
 		if entry.TurnSeq > 0 {
 			if policy, canceled := canceledTurns[entry.TurnSeq]; canceled {
-				if policy == cancelReplayPolicyDropUnstarted {
-					if _, active := activeCanceledTurns[entry.TurnSeq]; active {
-						policy = cancelReplayPolicyKeepStableInput
-					} else {
-						policy = cancelReplayPolicyDropTurn
-					}
+				_, active := activeCanceledTurns[entry.TurnSeq]
+				switch {
+				case active && isCanceledTurnActivityEntry(entry):
+					// A canceled turn with model/tool activity is recoverable
+					// history, not merely an abandoned user input.
+					filtered = append(filtered, entry)
+					continue
+				case policy == cancelReplayPolicyDropUnstarted && active:
+					policy = cancelReplayPolicyKeepStableInput
+				case policy == cancelReplayPolicyDropUnstarted:
+					policy = cancelReplayPolicyDropTurn
 				}
 				if policy == cancelReplayPolicyDropTurn || !isStableCanceledTurnInputEntry(entry) {
 					continue
@@ -586,7 +618,18 @@ func isStableCanceledTurnInputEntry(entry HistoryEntry) bool {
 
 func isCanceledTurnActivityEntry(entry HistoryEntry) bool {
 	switch strings.TrimSpace(entry.Kind) {
-	case "model_message", "assistant_text", "tool_call", "tool_result":
+	case "model_message":
+		var payload modelMessageEntryPayload
+		if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+			return false
+		}
+		switch strings.TrimSpace(payload.Message.Role) {
+		case "assistant", "tool":
+			return true
+		default:
+			return false
+		}
+	case "assistant_text", "tool_call", "tool_result":
 		return true
 	default:
 		return false
@@ -619,6 +662,11 @@ func decodeCompactionSummaryEntry(entry HistoryEntry) (string, bool) {
 	}
 	text := strings.TrimSpace(payload.Summary)
 	return text, text != ""
+}
+
+func hasStructuredToolCallPayload(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 func isHistoricalReplayToolResult(conversation *ConversationFile, entry HistoryEntry) bool {
@@ -744,9 +792,21 @@ func (projector *HistoryProjector) ProjectLegacyCheckpointWithReplay(conversatio
 					}
 					steps = append(steps, stepPayload)
 				}
-				toolCall := &agentv1.ToolCall{}
-				if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
-					return nil, err
+				var toolCall *agentv1.ToolCall
+				if hasStructuredToolCallPayload(payload.ToolCall) {
+					toolCall = &agentv1.ToolCall{}
+					if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
+						return nil, err
+					}
+				} else {
+					toolCall = buildStartedToolCall(runtimecore.ToolInvocation{
+						CallID:   strings.TrimSpace(payload.ToolCallID),
+						ToolName: strings.TrimSpace(payload.ToolName),
+						ArgsJSON: []byte(payload.Arguments),
+					})
+					if toolCall == nil {
+						continue
+					}
 				}
 				if !shouldPersistToolResultName(firstNonEmpty(strings.TrimSpace(payload.ToolName), inferToolName(toolCall))) {
 					continue
@@ -782,12 +842,24 @@ func (projector *HistoryProjector) ProjectLegacyCheckpointWithReplay(conversatio
 					}
 					steps = append(steps, stepPayload)
 				}
-				if len(payload.ToolCall) == 0 {
+				if !hasStructuredToolCallPayload(payload.ToolCall) {
 					continue
 				}
-				toolCall := &agentv1.ToolCall{}
-				if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
-					return nil, err
+				var toolCall *agentv1.ToolCall
+				if hasStructuredToolCallPayload(payload.ToolCall) {
+					toolCall = &agentv1.ToolCall{}
+					if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
+						return nil, err
+					}
+				} else {
+					toolCall = buildStartedToolCall(runtimecore.ToolInvocation{
+						CallID:   strings.TrimSpace(payload.ToolCallID),
+						ToolName: strings.TrimSpace(payload.ToolName),
+						ArgsJSON: []byte(payload.Arguments),
+					})
+					if toolCall == nil {
+						continue
+					}
 				}
 				if !shouldPersistToolResultName(firstNonEmpty(strings.TrimSpace(payload.ToolName), inferToolName(toolCall))) {
 					continue

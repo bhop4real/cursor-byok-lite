@@ -96,7 +96,7 @@ func parseSubagentModelOverrides(items []*agentv1.SubagentModelOverride) parsedS
 	return parsed
 }
 
-func taskSubagentModelResolutionPayload(invocation runtimecore.ToolInvocation, parentModelID string, overrides map[string]runtimecore.SubagentModelOverrideSelection) map[string]any {
+func taskSubagentModelResolutionPayload(invocation runtimecore.ToolInvocation, parentModelID string, resolvedParentModelID string, overrides map[string]runtimecore.SubagentModelOverrideSelection) map[string]any {
 	if strings.TrimSpace(invocation.ToolName) != "Task" {
 		return nil
 	}
@@ -109,37 +109,24 @@ func taskSubagentModelResolutionPayload(invocation runtimecore.ToolInvocation, p
 	}
 	subagentType := readStringMapValue(args, "subagent_type", "subagentType")
 	taskRequestedModelID := readStringMapValue(args, "model", "model_id", "modelId")
-	effectiveModelID := taskRequestedModelID
-	selection := "none"
-	disabled := false
-	overrideHit := false
-	matchedSubagentType := ""
-	if override, matched, ok := runtimecore.LookupSubagentModelOverride(overrides, subagentType); ok {
-		overrideHit = true
-		matchedSubagentType = matched
-		selection = strings.TrimSpace(override.Selection)
-		switch selection {
-		case "model":
-			effectiveModelID = strings.TrimSpace(override.ModelID)
-		case "inherit":
-			effectiveModelID = strings.TrimSpace(parentModelID)
-		case "disabled":
-			disabled = true
-			effectiveModelID = ""
-		}
-	}
-	if effectiveModelID == "" && !disabled {
-		effectiveModelID = strings.TrimSpace(parentModelID)
-	}
+	effectiveModelID, provenance, selection, disabled, matchedSubagentType := resolveTaskModelSelection(
+		subagentType,
+		taskRequestedModelID,
+		parentModelID,
+		resolvedParentModelID,
+		overrides,
+	)
 	payload := map[string]any{
-		"tool_call_id":            strings.TrimSpace(invocation.CallID),
-		"subagent_type":           subagentType,
-		"override_hit":            overrideHit,
-		"selection":               selection,
-		"task_requested_model_id": taskRequestedModelID,
-		"parent_model_id":         strings.TrimSpace(parentModelID),
-		"effective_model_id":      strings.TrimSpace(effectiveModelID),
-		"disabled":                disabled,
+		"tool_call_id":             strings.TrimSpace(invocation.CallID),
+		"subagent_type":            subagentType,
+		"override_hit":             matchedSubagentType != "",
+		"selection":                selection,
+		"provenance":               provenance,
+		"task_requested_model_id":  taskRequestedModelID,
+		"parent_model_id":          strings.TrimSpace(parentModelID),
+		"resolved_parent_model_id": strings.TrimSpace(resolvedParentModelID),
+		"effective_model_id":       strings.TrimSpace(effectiveModelID),
+		"disabled":                 disabled,
 	}
 	if matchedSubagentType != "" {
 		payload["matched_subagent_type"] = matchedSubagentType
@@ -147,7 +134,33 @@ func taskSubagentModelResolutionPayload(invocation runtimecore.ToolInvocation, p
 	return payload
 }
 
-func rewriteTaskInvocationModelForDisplay(invocation runtimecore.ToolInvocation, parentModelID string, overrides map[string]runtimecore.SubagentModelOverrideSelection) runtimecore.ToolInvocation {
+func resolveTaskModelSelection(subagentType string, taskRequestedModelID string, parentModelID string, resolvedParentModelID string, overrides map[string]runtimecore.SubagentModelOverrideSelection) (string, string, string, bool, string) {
+	override, matched, hasOverride := runtimecore.LookupSubagentModelOverride(overrides, subagentType)
+	selection := "none"
+	if hasOverride {
+		selection = strings.TrimSpace(override.Selection)
+		if selection == "disabled" {
+			return "", "disabled", selection, true, matched
+		}
+	}
+	if explicit := strings.TrimSpace(taskRequestedModelID); explicit != "" {
+		return explicit, "explicit", selection, false, matched
+	}
+	if hasOverride && selection == "model" {
+		if modelID := strings.TrimSpace(override.ModelID); modelID != "" {
+			return modelID, "override", selection, false, matched
+		}
+	}
+	if resolved := strings.TrimSpace(resolvedParentModelID); resolved != "" {
+		return resolved, "resolved_parent", selection, false, matched
+	}
+	if parent := strings.TrimSpace(parentModelID); parent != "" {
+		return parent, "parent", selection, false, matched
+	}
+	return "", "fallback", selection, false, matched
+}
+
+func rewriteTaskInvocationModelForDisplay(invocation runtimecore.ToolInvocation, parentModelID string, resolvedParentModelID string, overrides map[string]runtimecore.SubagentModelOverrideSelection) runtimecore.ToolInvocation {
 	if strings.TrimSpace(invocation.ToolName) != "Task" {
 		return invocation
 	}
@@ -156,20 +169,9 @@ func rewriteTaskInvocationModelForDisplay(invocation runtimecore.ToolInvocation,
 		return invocation
 	}
 	subagentType := readStringMapValue(args, "subagent_type", "subagentType")
-	override, _, ok := runtimecore.LookupSubagentModelOverride(overrides, subagentType)
-	if !ok {
-		return invocation
-	}
-	effectiveModelID := ""
-	switch strings.TrimSpace(override.Selection) {
-	case "model":
-		effectiveModelID = strings.TrimSpace(override.ModelID)
-	case "inherit":
-		effectiveModelID = strings.TrimSpace(parentModelID)
-	default:
-		return invocation
-	}
-	if effectiveModelID == "" {
+	taskRequestedModelID := readStringMapValue(args, "model", "model_id", "modelId")
+	effectiveModelID, _, _, disabled, _ := resolveTaskModelSelection(subagentType, taskRequestedModelID, parentModelID, resolvedParentModelID, overrides)
+	if disabled || effectiveModelID == "" || effectiveModelID == taskRequestedModelID {
 		return invocation
 	}
 	args["model"] = effectiveModelID
@@ -593,7 +595,9 @@ func (service *Service) decodeInboundIntent(requestID string, message *agentv1.A
 		intent.ConversationID = conversationID
 		intent.ConversationState = runRequest.GetConversationState()
 		intent.UserMessage = extractUserMessage(message)
-		intent.RequestContext = extractRequestContext(message)
+		intent.RequestContext = requestContextWithTopLevelMCPFileSystemOptions(extractRequestContext(message), runRequest.GetMcpFileSystemOptions())
+		intent.DirectMCPTools = runRequest.GetMcpTools().GetMcpTools()
+		intent.MCPFileSystemOptions = runRequest.GetMcpFileSystemOptions()
 		if service.shouldIgnoreEmptyResumeRunRequest(requestID, runRequest, intent.UserMessage, intent.RequestContext) {
 			intent.Kind = "metadata"
 			intent.StartsRun = false
@@ -639,6 +643,8 @@ func (service *Service) decodeInboundIntent(requestID string, message *agentv1.A
 		intent.ConversationID = conversationID
 		intent.SubagentTypeName = strings.TrimSpace(prewarmRequest.GetSubagentTypeName())
 		intent.ConversationState = prewarmRequest.GetConversationState()
+		intent.DirectMCPTools = prewarmRequest.GetMcpTools().GetMcpTools()
+		intent.MCPFileSystemOptions = prewarmRequest.GetMcpFileSystemOptions()
 		intent.Mode, intent.ModeSource, intent.HasExplicitMode, err = extractPrewarmMode(prewarmRequest)
 		if err != nil {
 			return InboundIntent{}, err
@@ -775,6 +781,7 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 		service.projector.InvalidateConversation(intent.ConversationID)
 	}
 
+	resolvedParentModelID := service.resolveParentModelID(intent.ModelID)
 	stream, err := service.broker.OpenStream(intent.RequestID, intent.ConversationID, turnSeq, intent.ModelID, intent.ModelName, effectiveMode, userMessageText(intent.UserMessage))
 	if err != nil {
 		return err
@@ -786,16 +793,23 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 		return err
 	}
 	updateStreamRequestContextData(stream, intent.RequestContext)
-	service.updateStreamMCPToolServers(stream, intent.RequestContext)
+	replaceStreamToolCapabilities(stream, deriveMCPToolCapabilities(
+		intent.DirectMCPTools,
+		intent.MCPFileSystemOptions,
+		intent.RequestContext,
+	))
 	clearPendingProviderCompletion(stream)
 	clearAllStreamTimers(stream)
 	stream.mu.Lock()
 	stream.ThinkingEffort = strings.TrimSpace(intent.ThinkingEffort)
+	stream.ResolvedModelID = strings.TrimSpace(resolvedParentModelID)
 	stream.SubagentModelOverrides = cloneSubagentModelOverrides(intent.SubagentModelOverrides)
 	stream.PendingProviderAction = providerActionNone
 	stream.PendingCompaction = nil
 	stream.PendingExecs = make(map[string]runtimecore.PendingExec)
 	stream.PendingInteractions = make(map[string]runtimecore.PendingInteraction)
+	stream.PartialToolCallIDs = make(map[string]struct{})
+	stream.PartialToolCalls = make(map[string]interruptedToolCall)
 	stream.RecentCompletedExecs = make(map[uint32]time.Time)
 	stream.BackgroundShells = make(map[string]*BackgroundShellState)
 	stream.BackgroundShellsByMessageID = make(map[uint32]string)
@@ -815,6 +829,7 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 	stream.ProviderSyntheticThinkingPublished = false
 	stream.ProviderFinishReason = ""
 	stream.ProviderUsage = turnUsageSnapshot{}
+	stream.InterruptedTurnFinalized = false
 	stream.ToolInvocationCount = 0
 	stream.UpdatedAt = time.Now().UTC()
 	stream.mu.Unlock()
@@ -822,6 +837,7 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 	service.debug.LogRuntime(context.Background(), intent.RequestID, intent.ConversationID, "stream_state_updated", map[string]any{
 		"turn_seq":                      turnSeq,
 		"model_id":                      strings.TrimSpace(intent.ModelID),
+		"resolved_model_id":             strings.TrimSpace(resolvedParentModelID),
 		"model_name":                    strings.TrimSpace(intent.ModelName),
 		"thinking_effort":               strings.TrimSpace(intent.ThinkingEffort),
 		"mode":                          effectiveMode.String(),
@@ -866,6 +882,9 @@ func (service *Service) handleCancelIntent(intent InboundIntent) error {
 	}
 	hasCheckpoint := checkpointConversationInitialized(stream)
 	if hasCheckpoint {
+		if err := service.finalizeInterruptedTurn(stream); err != nil {
+			return err
+		}
 		cancelReason := firstNonEmpty(intent.CancelReason, "user aborted")
 		_, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
 			newMetadataEntry(stream.TurnSeq, intent.RequestID, "control", map[string]any{
@@ -958,11 +977,11 @@ func (service *Service) handleExecResult(intent InboundIntent) error {
 		return service.handlePreCompactTerminal(stream, pending.ProviderPass, strings.TrimSpace(result.ToolResultPayload))
 	}
 	if result.ToolCall != nil {
-		if err := service.appendToolResult(stream, result.ToolCallID, deriveToolNameFromPendingExec(pending), pending.ArgsJSON, result.ToolResultPayload, pending.ReasoningContent, result.ToolCall); err != nil {
+		if err := service.appendToolResult(stream, result.ToolCallID, visiblePendingExecToolName(pending), visiblePendingExecArgsJSON(pending), result.ToolResultPayload, pending.ReasoningContent, result.ToolCall); err != nil {
 			return err
 		}
 	} else if strings.TrimSpace(result.ToolResultPayload) != "" {
-		if err := service.appendToolResult(stream, pending.ToolCallID, deriveToolNameFromPendingExec(pending), pending.ArgsJSON, result.ToolResultPayload, pending.ReasoningContent, nil); err != nil {
+		if err := service.appendToolResult(stream, pending.ToolCallID, visiblePendingExecToolName(pending), visiblePendingExecArgsJSON(pending), result.ToolResultPayload, pending.ReasoningContent, nil); err != nil {
 			return err
 		}
 	}
@@ -1033,7 +1052,7 @@ func (service *Service) handleExecControl(intent InboundIntent) error {
 		return service.handlePreCompactTerminal(stream, pending.ProviderPass, "")
 	}
 	if strings.TrimSpace(result.ToolResultPayload) != "" {
-		if err := service.appendToolResult(stream, pending.ToolCallID, deriveToolNameFromPendingExec(pending), pending.ArgsJSON, result.ToolResultPayload, pending.ReasoningContent, nil); err != nil {
+		if err := service.appendToolResult(stream, pending.ToolCallID, visiblePendingExecToolName(pending), visiblePendingExecArgsJSON(pending), result.ToolResultPayload, pending.ReasoningContent, nil); err != nil {
 			return err
 		}
 	}
@@ -1132,11 +1151,11 @@ func (service *Service) recoverNonStreamingExecAfterStreamClose(stream *ActiveSt
 		return nil
 	}
 	markExecCompleted(stream, pending)
-	toolName := strings.TrimSpace(deriveToolNameFromPendingExec(pending))
+	toolName := strings.TrimSpace(visiblePendingExecToolName(pending))
 	resultPayload := fmt.Sprintf("%s transport closed before terminal result arrived", firstNonEmpty(toolName, pending.ExecKind, "tool"))
 	log.Printf("forwarder synthetic exec recovery request_id=%s tool_call_id=%s message_id=%d exec_id=%s exec_kind=%s", strings.TrimSpace(stream.RequestID), strings.TrimSpace(pending.ToolCallID), pending.MessageID, strings.TrimSpace(pending.ExecID), strings.TrimSpace(pending.ExecKind))
 	if toolName != "" {
-		if err := service.appendToolResult(stream, pending.ToolCallID, toolName, pending.ArgsJSON, resultPayload, pending.ReasoningContent, nil); err != nil {
+		if err := service.appendToolResult(stream, pending.ToolCallID, toolName, visiblePendingExecArgsJSON(pending), resultPayload, pending.ReasoningContent, nil); err != nil {
 			return err
 		}
 	}
@@ -1360,6 +1379,7 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 		return service.failStream(stream, "unknown", err)
 	}
 	compiled = guardCompiledConversationForProvider(compiled)
+	compiled = applyProviderToolCapabilities(compiled, snapshotStreamToolCapabilities(stream))
 	if compacted, compactErr := service.maybeCompactBeforeProvider(stream, conversation, compiled); compactErr != nil {
 		service.setTurnPhase(stream, TurnPhaseFailed)
 		return service.failStream(stream, "unknown", compactErr)
@@ -1551,6 +1571,17 @@ func configuredProviderMaxOutputTokens(provider string, maxTokens int, anthropic
 	return providerDefaultMaxOutputTokens
 }
 
+func (service *Service) resolveParentModelID(modelID string) string {
+	if service == nil || service.resolver == nil {
+		return ""
+	}
+	channel, err := service.resolver.SelectChannelForModel(context.Background(), strings.TrimSpace(modelID))
+	if err != nil || channel == nil {
+		return ""
+	}
+	return strings.TrimSpace(channel.ID)
+}
+
 func (service *Service) maybeSaveLastAgentModelHash(conversation *ConversationFile, modelID string, mode agentv1.AgentMode, providerPass int) {
 	if service == nil || service.modelMemory == nil || service.resolver == nil {
 		return
@@ -1662,11 +1693,16 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 	if err := providerLoopInterruptErr(nil, stream, invocation.ModelCallID); err != nil {
 		return err
 	}
-	invocation = service.rewriteDirectMCPToolInvocation(stream, invocation)
-	invocation = service.normalizeCallMCPToolInvocation(stream, invocation)
+	visibleToolName := strings.TrimSpace(invocation.ToolName)
+	visibleArgsJSON := append([]byte(nil), invocation.ArgsJSON...)
+	var directMCPInvocation bool
+	var capabilityErr error
+	invocation, directMCPInvocation, capabilityErr = service.normalizeToolInvocationCapabilities(stream, invocation)
 	trimmedToolName := strings.TrimSpace(invocation.ToolName)
 	stream.mu.Lock()
 	mode := stream.Mode
+	parentModelID := strings.TrimSpace(stream.ModelID)
+	resolvedParentModelID := strings.TrimSpace(stream.ResolvedModelID)
 	subagentTypeName := ""
 	if stream.CheckpointConversation != nil {
 		subagentTypeName = strings.TrimSpace(stream.CheckpointConversation.SubagentTypeName)
@@ -1674,6 +1710,9 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 	stream.ToolInvocationCount++
 	stream.UpdatedAt = time.Now().UTC()
 	stream.mu.Unlock()
+	if capabilityErr != nil {
+		return service.completePreDispatchToolError(stream, invocation, nil, false, false, capabilityErr)
+	}
 	if !isToolAllowedInMode(mode, subagentTypeName, trimmedToolName) {
 		return service.completePreDispatchToolError(stream, invocation, nil, false, false, fmt.Errorf("tool invocation is not enabled in mode %s: %s", mode.String(), invocation.ToolName))
 	}
@@ -1713,10 +1752,10 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 	var subagentOverrides map[string]runtimecore.SubagentModelOverrideSelection
 	if isExecInvocation {
 		subagentOverrides = cloneSubagentModelOverrides(stream.SubagentModelOverrides)
-		if resolutionPayload := taskSubagentModelResolutionPayload(invocation, stream.ModelID, subagentOverrides); resolutionPayload != nil {
+		if resolutionPayload := taskSubagentModelResolutionPayload(invocation, parentModelID, resolvedParentModelID, subagentOverrides); resolutionPayload != nil {
 			service.debug.LogRuntime(context.Background(), stream.RequestID, stream.ConversationID, "subagent_model_override_resolved", resolutionPayload)
 		}
-		invocation = rewriteTaskInvocationModelForDisplay(invocation, stream.ModelID, subagentOverrides)
+		invocation = rewriteTaskInvocationModelForDisplay(invocation, parentModelID, resolvedParentModelID, subagentOverrides)
 	}
 	bufferExecDispatch := isExecInvocation && shouldBufferExecDispatch(invocation.ToolName)
 	suppressStartedToolCall := shouldSuppressStartedToolCallAfterPartial(stream, trimmedToolName, invocation.CallID)
@@ -1725,16 +1764,25 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 	ensureLoopActive := func() error {
 		return providerLoopInterruptErr(nil, stream, invocation.ModelCallID)
 	}
-	if startedToolCall != nil {
+	if startedToolCall != nil || directMCPInvocation {
 		if err := ensureLoopActive(); err != nil {
 			return err
 		}
-		toolCallPayload, err := protojson.Marshal(startedToolCall)
-		if err != nil {
-			return err
+		historyToolName := invocation.ToolName
+		historyArgsJSON := invocation.ArgsJSON
+		var toolCallPayload []byte
+		if directMCPInvocation {
+			historyToolName = visibleToolName
+			historyArgsJSON = visibleArgsJSON
+		} else if startedToolCall != nil {
+			encoded, err := protojson.Marshal(startedToolCall)
+			if err != nil {
+				return err
+			}
+			toolCallPayload = encoded
 		}
 		_, err = service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
-			newToolCallEntryWithProviderMetadata(stream.TurnSeq, stream.RequestID, invocation.CallID, invocation.ToolName, invocation.ReasoningContent, invocation.ReasoningSignature, invocation.ReasoningSignatureSource, invocation.ReasoningProviderItemID, invocation.ReasoningProviderStatus, invocation.ReasoningProviderSummary, invocation.ProviderItemID, invocation.ProviderCallID, invocation.ProviderStatus, toolCallPayload),
+			newToolCallEntryWithProviderMetadata(stream.TurnSeq, stream.RequestID, invocation.CallID, historyToolName, historyArgsJSON, invocation.ReasoningContent, invocation.ReasoningSignature, invocation.ReasoningSignatureSource, invocation.ReasoningProviderItemID, invocation.ReasoningProviderStatus, invocation.ReasoningProviderSummary, invocation.ProviderItemID, invocation.ProviderCallID, invocation.ProviderStatus, toolCallPayload),
 		})
 		if err != nil {
 			return err
@@ -1769,7 +1817,8 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 	if isExecInvocation {
 		serverMessage, pendingExec, err := service.execBridge.OpenExec(execbridge.OpenExecContext{
 			ConversationID:         stream.ConversationID,
-			ModelID:                stream.ModelID,
+			ModelID:                parentModelID,
+			ResolvedModelID:        resolvedParentModelID,
 			SubagentModelOverrides: subagentOverrides,
 		}, invocation)
 		if err != nil {
@@ -1779,6 +1828,10 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 		pendingExec.ReasoningContent = invocation.ReasoningContent
 		pendingExec.ReasoningSignature = invocation.ReasoningSignature
 		pendingExec.ReasoningSignatureSource = invocation.ReasoningSignatureSource
+		if directMCPInvocation {
+			pendingExec.VisibleToolName = visibleToolName
+			pendingExec.VisibleArgsJSON = visibleArgsJSON
+		}
 		pendingExec = initializePendingExecForTracking(pendingExec)
 		stream.mu.Lock()
 		pendingExec.ProviderPass = stream.ProviderPassCount
@@ -1874,7 +1927,7 @@ func (service *Service) recordExecDispatchMetadata(stream *ActiveStream, pending
 	if service == nil || stream == nil {
 		return
 	}
-	toolName := strings.TrimSpace(deriveToolNameFromPendingExec(pending))
+	toolName := strings.TrimSpace(visiblePendingExecToolName(pending))
 	if _, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
 		newMetadataEntry(stream.TurnSeq, stream.RequestID, "exec_dispatch", map[string]any{
 			"tool_call_id":    pending.ToolCallID,
@@ -2244,7 +2297,9 @@ func (service *Service) checkpointCompiledConversation(stream *ActiveStream, con
 		log.Printf("forwarder checkpoint token estimate failed request_id=%s conversation_id=%s err=%v", strings.TrimSpace(activeStreamRequestID(stream)), strings.TrimSpace(conversation.ConversationID), err)
 		return CompiledConversation{}, false
 	}
-	return guardCompiledConversationForProvider(compiled), true
+	compiled = guardCompiledConversationForProvider(compiled)
+	compiled = applyProviderToolCapabilities(compiled, snapshotStreamToolCapabilities(stream))
+	return compiled, true
 }
 
 func (service *Service) checkpointDisplayMaxTokens(stream *ActiveStream, conversation *ConversationFile) int64 {
@@ -2484,13 +2539,14 @@ func newAssistantTextEntryWithProviderMetadata(turnSeq int64, requestID string, 
 
 // newToolCallEntry 构造 tool_call entry。
 func newToolCallEntry(turnSeq int64, requestID string, toolCallID string, toolName string, reasoningContent string, reasoningSignature string, toolCall json.RawMessage) HistoryEntry {
-	return newToolCallEntryWithProviderMetadata(turnSeq, requestID, toolCallID, toolName, reasoningContent, reasoningSignature, "", "", "", nil, "", "", "", toolCall)
+	return newToolCallEntryWithProviderMetadata(turnSeq, requestID, toolCallID, toolName, nil, reasoningContent, reasoningSignature, "", "", "", nil, "", "", "", toolCall)
 }
 
-func newToolCallEntryWithProviderMetadata(turnSeq int64, requestID string, toolCallID string, toolName string, reasoningContent string, reasoningSignature string, reasoningSignatureSource string, reasoningItemID string, reasoningStatus string, reasoningSummary json.RawMessage, providerItemID string, providerCallID string, providerStatus string, toolCall json.RawMessage) HistoryEntry {
+func newToolCallEntryWithProviderMetadata(turnSeq int64, requestID string, toolCallID string, toolName string, argsJSON []byte, reasoningContent string, reasoningSignature string, reasoningSignatureSource string, reasoningItemID string, reasoningStatus string, reasoningSummary json.RawMessage, providerItemID string, providerCallID string, providerStatus string, toolCall json.RawMessage) HistoryEntry {
 	payload, _ := json.Marshal(toolCallEntryPayload{
 		ToolCallID:               strings.TrimSpace(toolCallID),
 		ToolName:                 strings.TrimSpace(toolName),
+		Arguments:                strings.TrimSpace(string(argsJSON)),
 		ReasoningContent:         reasoningContent,
 		ReasoningSignature:       strings.TrimSpace(reasoningSignature),
 		ReasoningSignatureSource: strings.TrimSpace(reasoningSignatureSource),
@@ -3200,11 +3256,11 @@ func pendingAssistantToolShape(pending runtimecore.PendingExec) (string, []byte,
 		}
 		return "Write", argsJSON, true
 	default:
-		toolName := strings.TrimSpace(deriveToolNameFromPendingExec(pending))
+		toolName := strings.TrimSpace(visiblePendingExecToolName(pending))
 		if toolName == "" {
 			return "", nil, false
 		}
-		return toolName, append([]byte(nil), pending.ArgsJSON...), true
+		return toolName, visiblePendingExecArgsJSON(pending), true
 	}
 }
 
@@ -3272,120 +3328,129 @@ func recentlyCompletedExecExists(stream *ActiveStream, messageID uint32) bool {
 	return true
 }
 
-func (service *Service) updateStreamMCPToolServers(stream *ActiveStream, requestContext *agentv1.RequestContext) {
-	if stream == nil {
-		return
-	}
-	servers := collectMCPToolServers(requestContext)
-	if len(servers) == 0 {
-		return
-	}
-	stream.mu.Lock()
-	if stream.MCPToolServers == nil {
-		stream.MCPToolServers = make(map[string]string, len(servers))
-	}
-	for toolName, serverIdentifier := range servers {
-		trimmedToolName := strings.TrimSpace(toolName)
-		trimmedServerIdentifier := strings.TrimSpace(serverIdentifier)
-		if trimmedToolName == "" || trimmedServerIdentifier == "" {
-			continue
-		}
-		stream.MCPToolServers[trimmedToolName] = trimmedServerIdentifier
-	}
-	stream.UpdatedAt = time.Now().UTC()
-	stream.mu.Unlock()
-}
-
-func (service *Service) rewriteDirectMCPToolInvocation(stream *ActiveStream, invocation runtimecore.ToolInvocation) runtimecore.ToolInvocation {
+func (service *Service) normalizeToolInvocationCapabilities(stream *ActiveStream, invocation runtimecore.ToolInvocation) (runtimecore.ToolInvocation, bool, error) {
+	capabilities := snapshotStreamToolCapabilities(stream)
 	toolName := strings.TrimSpace(invocation.ToolName)
-	if toolName == "" || isExecTool(toolName) {
-		return invocation
+	if toolName == "ReadLints" && !capabilities.ReadLintsEnabled {
+		return invocation, false, fmt.Errorf("tool unavailable for this request: ReadLints")
 	}
-	serverIdentifier := lookupMCPToolServer(stream, toolName)
-	if serverIdentifier == "" {
-		return invocation
+	if directTool, ok := capabilities.directTool(toolName); ok {
+		arguments := make(map[string]any)
+		if len(invocation.ArgsJSON) > 0 {
+			if err := json.Unmarshal(invocation.ArgsJSON, &arguments); err != nil {
+				return invocation, true, fmt.Errorf("decode direct MCP tool args failed: %w", err)
+			}
+		}
+		encoded, err := encodeMCPInvocationArgs(directTool.Server, directTool.ToolName, arguments)
+		if err != nil {
+			return invocation, true, err
+		}
+		invocation.ToolName = "CallMcpTool"
+		invocation.ArgsJSON = encoded
+		return invocation, true, nil
 	}
 
-	arguments := make(map[string]any)
-	if len(invocation.ArgsJSON) > 0 {
-		_ = json.Unmarshal(invocation.ArgsJSON, &arguments)
+	switch toolName {
+	case "CallMcpTool":
+		normalized, err := normalizeCallMCPToolInvocation(capabilities, invocation)
+		return normalized, false, err
+	case "FetchMcpResource":
+		normalized, err := validateFetchMCPResourceInvocation(capabilities, invocation)
+		return normalized, false, err
+	default:
+		return invocation, false, nil
 	}
-	payload := struct {
-		Server    string         `json:"server"`
-		ToolName  string         `json:"toolName"`
-		Arguments map[string]any `json:"arguments,omitempty"`
-	}{
-		Server:    serverIdentifier,
-		ToolName:  toolName,
-		Arguments: arguments,
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return invocation
-	}
-	invocation.ToolName = "CallMcpTool"
-	invocation.ArgsJSON = encoded
-	return invocation
 }
 
-func (service *Service) normalizeCallMCPToolInvocation(stream *ActiveStream, invocation runtimecore.ToolInvocation) runtimecore.ToolInvocation {
-	if strings.TrimSpace(invocation.ToolName) != "CallMcpTool" {
-		return invocation
+func normalizeCallMCPToolInvocation(capabilities MCPToolCapabilities, invocation runtimecore.ToolInvocation) (runtimecore.ToolInvocation, error) {
+	if !capabilities.CallMcpEnabled {
+		return invocation, fmt.Errorf("ToolNotFound: CallMcpTool is unavailable for this request")
 	}
-
 	payload, err := runtimecore.DecodeMCPToolPayload(invocation.ArgsJSON)
 	if err != nil {
-		return invocation
+		return invocation, fmt.Errorf("decode CallMcpTool args failed: %w", err)
 	}
-
-	serverIdentifier := firstNonEmpty(payload.Server, payload.ProviderIdentifier)
+	server := firstNonEmpty(payload.Server, payload.ProviderIdentifier)
 	toolName := strings.TrimSpace(payload.ToolName)
-	name := strings.TrimSpace(payload.Name)
 	if toolName == "" {
-		toolName = runtimecore.InferMCPToolName(serverIdentifier, name)
-	}
-	if serverIdentifier == "" {
-		serverIdentifier = lookupMCPToolServer(stream, toolName)
-		if serverIdentifier == "" && name != "" {
-			serverIdentifier = runtimecore.InferMCPServerIdentifier(name)
+		name := strings.TrimSpace(payload.Name)
+		if server != "" {
+			toolName = runtimecore.InferMCPToolName(server, name)
+		} else {
+			toolName = name
 		}
 	}
-
 	if toolName == "" {
-		return invocation
+		return invocation, fmt.Errorf("ToolNotFound: MCP tool name is required")
 	}
+	if server == "" {
+		resolvedServer, candidateCount := capabilities.resolveMCPServer(toolName)
+		switch candidateCount {
+		case 0:
+			return invocation, fmt.Errorf("ToolNotFound: MCP tool %q is not available for this request", toolName)
+		case 1:
+			server = resolvedServer
+		default:
+			return invocation, fmt.Errorf("ToolNotFound: MCP tool %q is ambiguous across %d current servers; specify server", toolName, candidateCount)
+		}
+	}
+	if !capabilities.hasMCPPair(server, toolName) {
+		return invocation, fmt.Errorf("ToolNotFound: MCP server/tool pair %q/%q is not available for this request", server, toolName)
+	}
+	encoded, err := encodeMCPInvocationArgs(server, toolName, payload.Arguments)
+	if err != nil {
+		return invocation, err
+	}
+	invocation.ArgsJSON = encoded
+	return invocation, nil
+}
 
-	normalized := struct {
+func encodeMCPInvocationArgs(server string, toolName string, arguments map[string]any) ([]byte, error) {
+	if arguments == nil {
+		arguments = make(map[string]any)
+	}
+	encoded, err := json.Marshal(struct {
 		Server    string         `json:"server"`
 		ToolName  string         `json:"toolName"`
 		Arguments map[string]any `json:"arguments,omitempty"`
 	}{
-		Server:    serverIdentifier,
-		ToolName:  toolName,
-		Arguments: payload.Arguments,
-	}
-	encoded, err := json.Marshal(normalized)
+		Server:    strings.TrimSpace(server),
+		ToolName:  strings.TrimSpace(toolName),
+		Arguments: arguments,
+	})
 	if err != nil {
-		return invocation
+		return nil, fmt.Errorf("encode CallMcpTool args failed: %w", err)
 	}
-	invocation.ArgsJSON = encoded
-	return invocation
+	return encoded, nil
 }
 
-func lookupMCPToolServer(stream *ActiveStream, toolName string) string {
-	trimmedToolName := strings.TrimSpace(toolName)
-	if trimmedToolName == "" {
-		return ""
+func validateFetchMCPResourceInvocation(capabilities MCPToolCapabilities, invocation runtimecore.ToolInvocation) (runtimecore.ToolInvocation, error) {
+	if !capabilities.FetchResourceEnabled {
+		return invocation, fmt.Errorf("ToolNotFound: FetchMcpResource is unavailable for this request")
 	}
-	if stream != nil {
-		stream.mu.Lock()
-		serverIdentifier := strings.TrimSpace(stream.MCPToolServers[trimmedToolName])
-		stream.mu.Unlock()
-		if serverIdentifier != "" {
-			return serverIdentifier
-		}
+	var args struct {
+		Server       string `json:"server"`
+		URI          string `json:"uri"`
+		DownloadPath string `json:"downloadPath,omitempty"`
 	}
-	return ""
+	if err := json.Unmarshal(invocation.ArgsJSON, &args); err != nil {
+		return invocation, fmt.Errorf("decode FetchMcpResource args failed: %w", err)
+	}
+	args.Server = strings.TrimSpace(args.Server)
+	args.URI = strings.TrimSpace(args.URI)
+	args.DownloadPath = strings.TrimSpace(args.DownloadPath)
+	if args.Server == "" || args.URI == "" {
+		return invocation, fmt.Errorf("ToolNotFound: FetchMcpResource requires a current server and resource URI")
+	}
+	if !capabilities.hasResourceServer(args.Server) {
+		return invocation, fmt.Errorf("ToolNotFound: MCP resource server %q is not available for this request", args.Server)
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return invocation, fmt.Errorf("encode FetchMcpResource args failed: %w", err)
+	}
+	invocation.ArgsJSON = encoded
+	return invocation, nil
 }
 
 func readStringAny(value any) string {
@@ -3458,6 +3523,17 @@ func inferToolName(toolCall *agentv1.ToolCall) string {
 	default:
 		return ""
 	}
+}
+
+func visiblePendingExecToolName(pending runtimecore.PendingExec) string {
+	return firstNonEmpty(strings.TrimSpace(pending.VisibleToolName), deriveToolNameFromPendingExec(pending))
+}
+
+func visiblePendingExecArgsJSON(pending runtimecore.PendingExec) []byte {
+	if len(pending.VisibleArgsJSON) > 0 {
+		return append([]byte(nil), pending.VisibleArgsJSON...)
+	}
+	return append([]byte(nil), pending.ArgsJSON...)
 }
 
 // deriveToolNameFromPendingExec 根据执行桥种类反推出 canonical 工具名。

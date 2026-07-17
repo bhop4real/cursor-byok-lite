@@ -125,6 +125,7 @@ type ActiveStream struct {
 	ConversationID         string
 	TurnSeq                int64
 	ModelID                string
+	ResolvedModelID        string
 	ModelName              string
 	Mode                   agentv1.AgentMode
 	LatestUserText         string
@@ -160,6 +161,7 @@ type ActiveStream struct {
 	ProviderFinishReason                        string
 	ProviderUsage                               turnUsageSnapshot
 	ProviderTerminalToolInvocation              bool
+	InterruptedTurnFinalized                    bool
 	PendingCompaction                           *PendingCompaction
 
 	Backlog                     []StreamEvent
@@ -171,8 +173,9 @@ type ActiveStream struct {
 	PendingExecs                map[string]runtimecore.PendingExec
 	PendingInteractions         map[string]runtimecore.PendingInteraction
 	PartialToolCallIDs          map[string]struct{}
+	PartialToolCalls            map[string]interruptedToolCall
 	PatchEditQueues             map[string][]queuedPatchEditOperation
-	MCPToolServers              map[string]string
+	ToolCapabilities            MCPToolCapabilities
 	WorkspacePaths              []string
 	TerminalsFolder             string
 	RequestFileContents         map[string]string
@@ -186,6 +189,20 @@ type ActiveStream struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type interruptedToolCall struct {
+	ToolCallID               string
+	ToolName                 string
+	Arguments                string
+	ReasoningContent         string
+	ReasoningSignature       string
+	ReasoningSignatureSource string
+	ProviderItemID           string
+	ProviderCallID           string
+	ProviderStatus           string
+	ModelCallID              string
+	ToolCall                 json.RawMessage
 }
 
 type BackgroundShellState struct {
@@ -343,6 +360,7 @@ type toolResultEntryPayload struct {
 type toolCallEntryPayload struct {
 	ToolCallID               string          `json:"tool_call_id"`
 	ToolName                 string          `json:"tool_name"`
+	Arguments                string          `json:"arguments,omitempty"`
 	ReasoningContent         string          `json:"reasoning_content,omitempty"`
 	ReasoningSignature       string          `json:"reasoning_signature,omitempty"`
 	ReasoningSignatureSource string          `json:"reasoning_signature_source,omitempty"`
@@ -352,7 +370,7 @@ type toolCallEntryPayload struct {
 	ProviderItemID           string          `json:"provider_item_id,omitempty"`
 	ProviderCallID           string          `json:"provider_call_id,omitempty"`
 	ProviderStatus           string          `json:"provider_status,omitempty"`
-	ToolCall                 json.RawMessage `json:"tool_call"`
+	ToolCall                 json.RawMessage `json:"tool_call,omitempty"`
 }
 
 type assistantTextPayload struct {
@@ -423,6 +441,8 @@ type InboundIntent struct {
 	ConversationState        *agentv1.ConversationStateStructure
 	UserMessage              *agentv1.UserMessage
 	RequestContext           *agentv1.RequestContext
+	DirectMCPTools           []*agentv1.McpToolDefinition
+	MCPFileSystemOptions     *agentv1.McpFileSystemOptions
 	ClientMessage            *agentv1.AgentClientMessage
 	ExecClientMessage        *agentv1.ExecClientMessage
 	ExecClientControlMessage *agentv1.ExecClientControlMessage

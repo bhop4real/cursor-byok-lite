@@ -157,7 +157,7 @@ function handleSave() {
                 </label>
 
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">ModelID</span>
+                  <span class="text-sm text-[#d4d4d4]">模型标识</span>
                   <input
                     v-model="draft.modelID"
                     type="text"
@@ -174,7 +174,7 @@ function handleSave() {
                 </label>
 
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">API Key</span>
+                  <span class="text-sm text-[#d4d4d4]">访问密钥</span>
                   <input
                     v-model="draft.apiKey"
                     type="text"
@@ -184,7 +184,7 @@ function handleSave() {
               </div>
 
               <label class="mt-3 flex flex-col gap-1">
-                <span class="text-sm text-[#d4d4d4]">baseURL</span>
+                <span class="text-sm text-[#d4d4d4]">接口地址</span>
                 <input
                   v-model="draft.baseURL"
                   type="text"
@@ -193,7 +193,7 @@ function handleSave() {
               </label>
 
               <label class="mt-3 flex flex-col gap-1">
-                <span class="text-sm text-[#d4d4d4]">context_window_tokens</span>
+                <span class="text-sm text-[#d4d4d4]">上下文窗口</span>
                 <input
                   v-model="contextWindowTokensInput"
                   type="text"
@@ -205,7 +205,7 @@ function handleSave() {
 
               <div v-if="draft.type === 'openai'" class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">reasoning_effort</span>
+                  <span class="text-sm text-[#d4d4d4]">推理强度</span>
                   <Select
                     v-model="draft.reasoningEffort"
                     :options="reasoningEffortOptions"
@@ -213,7 +213,7 @@ function handleSave() {
                 </label>
 
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">max token</span>
+                  <span class="text-sm text-[#d4d4d4]">最大输出 Token</span>
                   <input
                     v-model="maxCompletionTokensInput"
                     type="text"
@@ -224,7 +224,7 @@ function handleSave() {
                 </label>
 
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">endpoint</span>
+                  <span class="text-sm text-[#d4d4d4]">接口端点</span>
                   <Select
                     v-model="draft.openAIEndpoint"
                     :options="openAIEndpointOptions"
@@ -258,7 +258,7 @@ function handleSave() {
 
               <div v-if="draft.type === 'anthropic'" class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">max_tokens</span>
+                  <span class="text-sm text-[#d4d4d4]">最大输出 Token</span>
                   <input
                     v-model="anthropicMaxTokensInput"
                     type="text"
@@ -269,7 +269,7 @@ function handleSave() {
                 </label>
 
                 <label class="flex flex-col gap-1">
-                  <span class="text-sm text-[#d4d4d4]">thinking effort</span>
+                  <span class="text-sm text-[#d4d4d4]">思考强度</span>
                   <Select
                     v-model="draft.anthropicThinkingEffort"
                     :options="anthropicThinkingEffortOptions"
@@ -278,7 +278,7 @@ function handleSave() {
               </div>
 
               <label class="mt-3 flex flex-col gap-1">
-                <span class="text-sm text-[#d4d4d4]">tooltipData</span>
+                <span class="text-sm text-[#d4d4d4]">备注</span>
                 <textarea
                   v-model="draft.tooltipData"
                   rows="5"

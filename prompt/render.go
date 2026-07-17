@@ -8,7 +8,7 @@ const fakeModelIDPlaceholder = "{{FAKE_MODEL_ID}}"
 func RenderPromptTemplate(text string, modelName string) string {
 	replacement := strings.TrimSpace(modelName)
 	if replacement == "" {
-		replacement = "当前请求模型"
+		replacement = "current request model"
 	}
 	return strings.ReplaceAll(text, fakeModelIDPlaceholder, replacement)
 }

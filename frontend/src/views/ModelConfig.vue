@@ -283,11 +283,11 @@ onBeforeUnmount(() => {
 
                 <div class="grid grid-cols-2 gap-2 text-sm text-[#a3a3a3]">
                   <div class="rounded-[8px] bg-[#232323] px-3 py-2">
-                    <div class="text-[11px] uppercase tracking-[0.08em] text-[#666]">Host</div>
+                    <div class="text-[11px] uppercase tracking-[0.08em] text-[#666]">接口主机</div>
                     <div class="mt-1 truncate text-[#d4d4d4]" :title="adapter.baseURL">{{ formatHost(adapter.baseURL) }}</div>
                   </div>
                   <div class="rounded-[8px] bg-[#232323] px-3 py-2">
-                    <div class="text-[11px] uppercase tracking-[0.08em] text-[#666]">API Key</div>
+                    <div class="text-[11px] uppercase tracking-[0.08em] text-[#666]">访问密钥</div>
                     <div class="mt-1 truncate text-[#d4d4d4]">{{ maskSecret(adapter.apiKey) }}</div>
                   </div>
                 </div>

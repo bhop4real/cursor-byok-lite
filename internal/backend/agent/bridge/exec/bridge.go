@@ -39,6 +39,7 @@ type ExecApplyResult struct {
 type OpenExecContext struct {
 	ConversationID         string
 	ModelID                string
+	ResolvedModelID        string
 	SubagentModelOverrides map[string]runtimecore.SubagentModelOverrideSelection
 }
 
@@ -776,19 +777,9 @@ func (bridge *Bridge) openTask(openContext OpenExecContext, toolCall runtimecore
 	readonly := readBoolArg(args, "readonly", "readOnly")
 	parentConversationID := strings.TrimSpace(openContext.ConversationID)
 	taskRequestedModelID := strings.TrimSpace(readStringArg(args, "model", "model_id", "modelId"))
-	modelID := taskRequestedModelID
-	if override, _, ok := runtimecore.LookupSubagentModelOverride(openContext.SubagentModelOverrides, subagentType); ok {
-		switch strings.TrimSpace(override.Selection) {
-		case "disabled":
-			return nil, runtimecore.PendingExec{}, fmt.Errorf("subagent type %q is disabled by model override", subagentType)
-		case "model":
-			modelID = strings.TrimSpace(override.ModelID)
-		case "inherit":
-			modelID = strings.TrimSpace(openContext.ModelID)
-		}
-	}
-	if modelID == "" {
-		modelID = strings.TrimSpace(openContext.ModelID)
+	modelID, err := resolveTaskModelID(openContext, subagentType, taskRequestedModelID)
+	if err != nil {
+		return nil, runtimecore.PendingExec{}, err
 	}
 	serverMessage := &agentv1.AgentServerMessage{
 		Message: &agentv1.AgentServerMessage_ExecServerMessage{
@@ -819,6 +810,26 @@ func (bridge *Bridge) openTask(openContext OpenExecContext, toolCall runtimecore
 		StreamState: "opened",
 		OpenedAt:    now,
 	}, nil
+}
+
+func resolveTaskModelID(openContext OpenExecContext, subagentType string, taskRequestedModelID string) (string, error) {
+	taskRequestedModelID = strings.TrimSpace(taskRequestedModelID)
+	override, _, hasOverride := runtimecore.LookupSubagentModelOverride(openContext.SubagentModelOverrides, subagentType)
+	if hasOverride && strings.TrimSpace(override.Selection) == "disabled" {
+		return "", fmt.Errorf("subagent type %q is disabled by model override", strings.TrimSpace(subagentType))
+	}
+	if taskRequestedModelID != "" {
+		return taskRequestedModelID, nil
+	}
+	if hasOverride && strings.TrimSpace(override.Selection) == "model" {
+		if modelID := strings.TrimSpace(override.ModelID); modelID != "" {
+			return modelID, nil
+		}
+	}
+	if resolvedModelID := strings.TrimSpace(openContext.ResolvedModelID); resolvedModelID != "" {
+		return resolvedModelID, nil
+	}
+	return strings.TrimSpace(openContext.ModelID), nil
 }
 
 // openGrep 构造 Grep 对应的执行桥请求。

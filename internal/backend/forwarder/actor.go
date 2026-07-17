@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	"cursor/gen/agentv1"
@@ -354,12 +355,14 @@ func releaseTerminalStreamState(stream *ActiveStream) {
 	stream.ProviderFinishReason = ""
 	stream.ProviderUsage = turnUsageSnapshot{}
 	stream.ProviderTerminalToolInvocation = false
+	stream.InterruptedTurnFinalized = false
 	stream.ToolInvocationCount = 0
 	stream.PendingExecs = nil
 	stream.PendingInteractions = nil
 	stream.PartialToolCallIDs = nil
+	stream.PartialToolCalls = nil
 	stream.PatchEditQueues = nil
-	stream.MCPToolServers = nil
+	stream.ToolCapabilities = MCPToolCapabilities{}
 	stream.WorkspacePaths = nil
 	stream.TerminalsFolder = ""
 	stream.RequestFileContents = nil
@@ -621,10 +624,30 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 			return nil
 		}
 		displayToolCall := service.rewriteTaskToolCallModelForDisplay(stream, event.ToolCall)
+		toolName := strings.TrimSpace(inferToolName(displayToolCall))
+		toolCallPayload, err := protojson.Marshal(displayToolCall)
+		if err != nil {
+			return err
+		}
 		stream.mu.Lock()
 		if stream.PartialToolCallIDs == nil {
 			stream.PartialToolCallIDs = make(map[string]struct{})
 		}
+		if stream.PartialToolCalls == nil {
+			stream.PartialToolCalls = make(map[string]interruptedToolCall)
+		}
+		partial := stream.PartialToolCalls[toolCallID]
+		partial.ToolCallID = toolCallID
+		partial.ToolName = firstNonEmpty(toolName, partial.ToolName)
+		partial.Arguments += event.ArgsTextDelta
+		partial.ReasoningContent = string(accumulatedReasoning)
+		partial.ReasoningSignature = accumulatedReasoningSignature
+		partial.ReasoningSignatureSource = accumulatedReasoningSignatureSource
+		partial.ProviderItemID = accumulatedReasoningItemID
+		partial.ProviderStatus = accumulatedReasoningStatus
+		partial.ModelCallID = modelCallID
+		partial.ToolCall = append(json.RawMessage(nil), toolCallPayload...)
+		stream.PartialToolCalls[toolCallID] = partial
 		stream.PartialToolCallIDs[toolCallID] = struct{}{}
 		stream.UpdatedAt = time.Now().UTC()
 		stream.mu.Unlock()
