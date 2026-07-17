@@ -24,40 +24,12 @@ type OpenAIAdapter struct {
 	client *http.Client
 }
 
-type openAIRequestBody struct {
-	Model           string            `json:"model"`
-	Tools           []json.RawMessage `json:"tools,omitempty"`
-	Messages        []map[string]any  `json:"messages"`
-	Stream          bool              `json:"stream"`
-	MaxTokens       int               `json:"max_tokens,omitempty"`
-	StreamOptions   map[string]any    `json:"stream_options"`
-	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
-	PromptCacheKey  string            `json:"prompt_cache_key,omitempty"`
-}
-
-type openAIResponsesRequestBody struct {
-	Model           string                    `json:"model"`
-	Instructions    string                    `json:"instructions,omitempty"`
-	Input           []map[string]any          `json:"input"`
-	Tools           []map[string]any          `json:"tools,omitempty"`
-	Stream          bool                      `json:"stream"`
-	MaxOutputTokens int                       `json:"max_output_tokens,omitempty"`
-	Reasoning       *openAIResponsesReasoning `json:"reasoning,omitempty"`
-	Include         []string                  `json:"include,omitempty"`
-	PromptCacheKey  string                    `json:"prompt_cache_key,omitempty"`
-	Store           bool                      `json:"store"`
-}
-
-type openAIResponsesReasoning struct {
-	Effort string `json:"effort,omitempty"`
-}
-
 type openAIToolAccumulator struct {
 	CallID                 string
 	Name                   string
 	Args                   strings.Builder
 	LastEmittedPath        string
-	LastStreamContent      string
+	ToolProgress           *incrementalToolProgress
 	LastCreatePlanSnapshot string
 	ProviderItemID         string
 	ProviderCallID         string
@@ -177,6 +149,15 @@ func NewOpenAIAdapter() *OpenAIAdapter {
 	return &OpenAIAdapter{
 		client: netproxy.NewHTTPClient(0),
 	}
+}
+
+// Close 释放适配器持有的 HTTP transport。
+func (adapter *OpenAIAdapter) Close() {
+	if adapter == nil {
+		return
+	}
+	netproxy.CloseHTTPClient(adapter.client)
+	adapter.client = nil
 }
 
 func openAIModelSupportsPromptCacheKey(modelID string) bool {
@@ -442,50 +423,41 @@ func (adapter *OpenAIAdapter) Stream(ctx context.Context, req StreamRequest, sin
 func (adapter *OpenAIAdapter) streamChatCompletions(ctx context.Context, req StreamRequest, baseURL string, apiKey string, modelID string, sink func(ModelEvent) error) error {
 	startedAt := time.Now().UTC()
 	finishedAt := time.Time{}
-	overrideBody := cloneRequestBodyOverride(req.RequestBodyOverride)
-	var body any = overrideBody
-	if len(overrideBody) == 0 {
+	body := cloneRequestBodyOverride(req.RequestBodyOverride)
+	if len(body) == 0 {
 		normalizedMessages, err := normalizeOpenAIProviderMessages(req.Messages, strings.TrimSpace(req.ReasoningEffort) != "")
 		if err != nil {
 			finishedAt = time.Now().UTC()
 			recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
 			return err
 		}
-		requestBody := openAIRequestBody{
-			Model:         modelID,
-			Messages:      normalizedMessages,
-			Stream:        true,
-			StreamOptions: map[string]any{"include_usage": true},
+		body = map[string]any{
+			"model":          modelID,
+			"messages":       normalizedMessages,
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
 		}
-		if shouldSendOpenAIMaxOutputTokens(modelID) {
-			requestBody.MaxTokens = req.MaxTokens
+		if shouldSendOpenAIMaxOutputTokens(modelID) && req.MaxTokens != 0 {
+			body["max_tokens"] = req.MaxTokens
 		}
 		if key := openAIPromptCacheKey(req, modelID); key != "" {
-			requestBody.PromptCacheKey = key
+			body["prompt_cache_key"] = key
 		}
 		if len(req.Tools) > 0 {
-			requestBody.Tools = req.Tools
+			body["tools"] = req.Tools
 		}
 		if strings.TrimSpace(req.ReasoningEffort) != "" {
-			requestBody.ReasoningEffort = req.ReasoningEffort
+			body["reasoning_effort"] = req.ReasoningEffort
 		}
-		body = requestBody
 	} else {
-		applyOpenAIPromptCacheKeyOverride(overrideBody, req, modelID)
+		applyOpenAIPromptCacheKeyOverride(body, req, modelID)
 	}
-	bodyMap, err := requestBodyToMap(body)
-	if err != nil {
+	applyOpenAIThinkingDisable(body, req, baseURL, modelID, req.OpenAIEndpoint)
+	if err := ApplyOpenAIExtraParams(body, req.OpenAIExtraParamsEnabled, req.OpenAIExtraParamsJSON); err != nil {
 		finishedAt = time.Now().UTC()
 		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
 		return err
 	}
-	applyOpenAIThinkingDisable(bodyMap, req, baseURL, modelID, req.OpenAIEndpoint)
-	if err := ApplyOpenAIExtraParams(bodyMap, req.OpenAIExtraParamsEnabled, req.OpenAIExtraParamsJSON); err != nil {
-		finishedAt = time.Now().UTC()
-		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
-		return err
-	}
-	body = bodyMap
 	requestURL := OpenAIEndpointURL(baseURL, req.OpenAIEndpoint)
 	recordLLMRequestArtifact(req, "openai", modelID, "POST", requestURL, body)
 
@@ -906,27 +878,28 @@ func (adapter *OpenAIAdapter) streamChatCompletions(ctx context.Context, req Str
 func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamRequest, baseURL string, apiKey string, modelID string, sink func(ModelEvent) error) error {
 	startedAt := time.Now().UTC()
 	finishedAt := time.Time{}
-	overrideBody := cloneRequestBodyOverride(req.RequestBodyOverride)
-	var body any = overrideBody
-	if len(overrideBody) == 0 {
+	body := cloneRequestBodyOverride(req.RequestBodyOverride)
+	if len(body) == 0 {
 		instructions, input, err := normalizeOpenAIResponsesInput(req.Messages)
 		if err != nil {
 			finishedAt = time.Now().UTC()
 			recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
 			return err
 		}
-		requestBody := openAIResponsesRequestBody{
-			Model:        modelID,
-			Instructions: instructions,
-			Input:        input,
-			Stream:       true,
-			Store:        false,
+		body = map[string]any{
+			"model":  modelID,
+			"input":  input,
+			"stream": true,
+			"store":  false,
 		}
-		if shouldSendOpenAIMaxOutputTokens(modelID) {
-			requestBody.MaxOutputTokens = req.MaxTokens
+		if instructions != "" {
+			body["instructions"] = instructions
+		}
+		if shouldSendOpenAIMaxOutputTokens(modelID) && req.MaxTokens != 0 {
+			body["max_output_tokens"] = req.MaxTokens
 		}
 		if key := openAIPromptCacheKey(req, modelID); key != "" {
-			requestBody.PromptCacheKey = key
+			body["prompt_cache_key"] = key
 		}
 		if len(req.Tools) > 0 {
 			tools, err := normalizeOpenAIResponsesTools(req.Tools)
@@ -941,29 +914,21 @@ func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamReq
 					req.RequestKnobs["openai_responses_image_generation_tool"] = "auto"
 				}
 			}
-			requestBody.Tools = tools
+			body["tools"] = tools
 		}
 		if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
-			requestBody.Reasoning = &openAIResponsesReasoning{Effort: effort}
-			requestBody.Include = []string{"reasoning.encrypted_content"}
+			body["reasoning"] = map[string]any{"effort": effort}
+			body["include"] = []string{"reasoning.encrypted_content"}
 		}
-		body = requestBody
 	} else {
-		applyOpenAIPromptCacheKeyOverride(overrideBody, req, modelID)
+		applyOpenAIPromptCacheKeyOverride(body, req, modelID)
 	}
-	bodyMap, err := requestBodyToMap(body)
-	if err != nil {
+	applyOpenAIThinkingDisable(body, req, baseURL, modelID, req.OpenAIEndpoint)
+	if err := ApplyOpenAIExtraParams(body, req.OpenAIExtraParamsEnabled, req.OpenAIExtraParamsJSON); err != nil {
 		finishedAt = time.Now().UTC()
 		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
 		return err
 	}
-	applyOpenAIThinkingDisable(bodyMap, req, baseURL, modelID, req.OpenAIEndpoint)
-	if err := ApplyOpenAIExtraParams(bodyMap, req.OpenAIExtraParamsEnabled, req.OpenAIExtraParamsJSON); err != nil {
-		finishedAt = time.Now().UTC()
-		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
-		return err
-	}
-	body = bodyMap
 
 	requestURL := OpenAIEndpointURL(baseURL, req.OpenAIEndpoint)
 	recordLLMRequestArtifact(req, "openai", modelID, "POST", requestURL, body)
@@ -1727,27 +1692,44 @@ func emitOpenAIToolProgress(
 		return nil
 	}
 	toolName := strings.TrimSpace(accumulator.Name)
+	if toolName != "CreatePlan" && toolName != "Write" && toolName != "PatchEdit" {
+		return nil
+	}
+
+	progress := accumulator.ToolProgress
+	if progress == nil {
+		progress = newIncrementalToolProgress(toolName)
+		if progress == nil {
+			return nil
+		}
+		progress.Consume(accumulator.Args.String())
+		accumulator.ToolProgress = progress
+	} else {
+		progress.Consume(argsTextDelta)
+	}
 	if toolName == "CreatePlan" {
+		args, ok := progress.CreatePlanArgs()
+		if progress.Complete() {
+			if completeArgs, err := runtimecore.DecodeCreatePlanArgsJSON([]byte(accumulator.Args.String())); err == nil {
+				args = completeArgs
+				ok = hasCreatePlanArgsProgress(args)
+			}
+		}
+		if !ok {
+			return nil
+		}
 		return emitCreatePlanToolProgress(
 			sink,
 			"openai",
 			model,
 			accumulator.CallID,
-			accumulator.Args.String(),
+			args,
 			argsTextDelta,
 			&accumulator.LastCreatePlanSnapshot,
 		)
 	}
-	if toolName != "Write" && toolName != "PatchEdit" {
-		return nil
-	}
-
-	rawArgs := accumulator.Args.String()
-	path, pathFound, pathComplete := extractJSONStringFieldPrefix(rawArgs, "path")
-	if !pathFound {
-		path, pathFound, pathComplete = extractJSONStringFieldPrefix(rawArgs, "file_path")
-	}
-	if pathFound && pathComplete {
+	path, pathComplete := progress.Path()
+	if pathComplete {
 		trimmedPath := strings.TrimSpace(path)
 		if trimmedPath != "" {
 			pathChanged := trimmedPath != accumulator.LastEmittedPath
@@ -1791,15 +1773,10 @@ func emitOpenAIToolProgress(
 			}
 		}
 	}
-	streamContent, streamFound := extractToolStreamContentPrefix(rawArgs, toolName)
-	if !streamFound {
-		return nil
-	}
-	delta := suffixAfterCommonPrefix(accumulator.LastStreamContent, streamContent)
+	delta := progress.TakeContentDelta(toolName)
 	if delta == "" {
 		return nil
 	}
-	accumulator.LastStreamContent = streamContent
 	return sink(ModelEvent{
 		Kind:       ModelEventKindToolCallDelta,
 		OccurredAt: time.Now().UTC(),

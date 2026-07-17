@@ -38,7 +38,6 @@
 
 - `~/.cursor-local-assistant-v2/config.yaml`
 - `~/.cursor-local-assistant-v2/data/ca.crt`
-- `~/.cursor-local-assistant-v2/data/ads/`
 - `~/.cursor-local-assistant-v2/history/usage.json`
 - `~/.cursor-local-assistant-v2/history/<conversationId>/state.json`
 - `~/.cursor-local-assistant-v2/history/<conversationId>/context.json`

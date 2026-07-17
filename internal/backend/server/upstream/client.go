@@ -17,7 +17,6 @@ import (
 	"cursor/gen/aiserverv1"
 	"cursor/internal/backend/server"
 	"cursor/internal/logger"
-	"cursor/internal/netproxy"
 	legacyruntime "cursor/internal/runtime"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -101,7 +100,7 @@ func buildUpstreamRequest(reqCtx *RequestContext, body []byte, options ForwardOp
 
 	upstreamClient := reqCtx.Deps.HTTPClient
 	if upstreamClient == nil {
-		upstreamClient = netproxy.NewHTTPClient(0)
+		upstreamClient = http.DefaultClient
 	}
 
 	return upstreamRequest, upstreamClient, nil

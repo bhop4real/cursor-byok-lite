@@ -128,6 +128,8 @@ type StreamRequest struct {
 	CompileSummary string
 	// Observer 负责写入 request-scoped LLM 工件。
 	Observer LLMArtifactObserver
+	// RawResponseObserver 仅在调试日志启用时接收 provider 原始响应块。
+	RawResponseObserver LLMArtifactObserver
 	// ArtifactPaths 用于由 adapter 回填工件路径。
 	ArtifactPaths *LLMArtifactPaths
 	// RequestBodyOverride 表示直接复用的 provider 原始请求体；设置后由 adapter 原样发送。

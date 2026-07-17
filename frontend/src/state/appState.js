@@ -499,6 +499,7 @@ function delay(ms) {
 
 function createEmptyHomeMetrics() {
   return {
+    providerCallsTotal: 0,
     turnsTotal: 0,
     validTurnsTotal: 0,
     invalidTurnsTotal: 0,
@@ -536,6 +537,7 @@ function normalizeConfig(source) {
   const homeMetrics = raw.homeMetrics && typeof raw.homeMetrics === "object" ? raw.homeMetrics : {};
   return {
     log: asBoolean(raw.log),
+    disableUpdates: asBoolean(raw.disableUpdates),
     providerStreamIdleTimeout: asPositiveInteger(raw.providerStreamIdleTimeout),
     backendListenAddr: asString(raw.configBackendListenAddr) || asString(raw.backendListenAddr),
     proxyListenAddr: asString(raw.configProxyListenAddr) || asString(raw.proxyListenAddr),
@@ -559,11 +561,11 @@ function asNullableRate(value) {
 
 function normalizeHomeMetrics(source) {
   const raw = source && typeof source === "object" ? source : {};
-  const providerCallsTotal = asPositiveInteger(raw.providerCallsTotal ?? raw.turnsTotal);
   return {
-    turnsTotal: providerCallsTotal,
-    validTurnsTotal: providerCallsTotal,
-    invalidTurnsTotal: 0,
+    providerCallsTotal: asPositiveInteger(raw.providerCallsTotal),
+    turnsTotal: asPositiveInteger(raw.turnsTotal),
+    validTurnsTotal: asPositiveInteger(raw.validTurnsTotal),
+    invalidTurnsTotal: asPositiveInteger(raw.invalidTurnsTotal),
     requestTokensTotal: asPositiveInteger(raw.requestTokensTotal),
     promptTokensTotal: asPositiveInteger(raw.promptTokensTotal),
     cacheReadTokens: asPositiveInteger(raw.cacheReadTokens),
@@ -581,6 +583,7 @@ function buildConfigPayload(source = appState) {
   const normalized = normalizeConfig(source);
   return {
     log: normalized.log,
+    disableUpdates: normalized.disableUpdates,
     providerStreamIdleTimeout: normalized.providerStreamIdleTimeout,
     backendListenAddr: normalized.backendListenAddr,
     proxyListenAddr: normalized.proxyListenAddr,
@@ -600,6 +603,7 @@ function applyConfigToState(config, { modelAdaptersOnly = false } = {}) {
   appState.modelAdapters = normalized.modelAdapters;
   appState.configBackendListenAddr = normalized.backendListenAddr;
   appState.configProxyListenAddr = normalized.proxyListenAddr;
+  appState.disableUpdates = normalized.disableUpdates;
   appState.routingMode = normalized.routing.mode;
   appState.includeCacheWriteInHitRate = normalized.homeMetrics.includeCacheWriteInHitRate;
   return normalized;
@@ -831,6 +835,7 @@ export const appState = reactive({
   modelAdapterTestResults: {},
   configBackendListenAddr: cachedConfig.backendListenAddr,
   configProxyListenAddr: cachedConfig.proxyListenAddr,
+  disableUpdates: cachedConfig.disableUpdates,
   routingMode: cachedConfig.routing.mode,
   includeCacheWriteInHitRate: cachedConfig.homeMetrics.includeCacheWriteInHitRate,
 

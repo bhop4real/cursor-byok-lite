@@ -1,6 +1,7 @@
 package forwarder
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,9 @@ const (
 	TurnPhaseCompleted       TurnPhase = "completed"
 	TurnPhaseFailed          TurnPhase = "failed"
 	TurnPhaseCanceled        TurnPhase = "canceled"
+
+	providerAccumulatedTextMaxBytes      = 4 << 20
+	providerAccumulatedReasoningMaxBytes = 4 << 20
 )
 
 type providerAction string
@@ -83,6 +87,12 @@ type streamTimerEvent struct {
 	ExecID    string
 	MessageID uint32
 	Reason    string
+}
+
+type streamTimerRegistration struct {
+	Token uint64
+	Timer *time.Timer
+	Done  chan struct{}
 }
 
 type streamCompactionEvent struct {
@@ -211,6 +221,10 @@ func (service *Service) ensureStreamActor(stream *ActiveStream) (chan streamComm
 		return nil, nil, fmt.Errorf("active stream is required")
 	}
 	stream.mu.Lock()
+	if stream.ActorStopping {
+		stream.mu.Unlock()
+		return nil, nil, errProviderLoopInterrupted
+	}
 	if stream.ActorMailbox != nil && stream.ActorDone != nil {
 		mailbox := stream.ActorMailbox
 		done := stream.ActorDone
@@ -219,16 +233,18 @@ func (service *Service) ensureStreamActor(stream *ActiveStream) (chan streamComm
 	}
 	mailbox := make(chan streamCommandEnvelope, 128)
 	done := make(chan struct{})
+	stop := make(chan struct{})
 	stream.ActorMailbox = mailbox
 	stream.ActorDone = done
-	if stream.TimerTokens == nil {
-		stream.TimerTokens = make(map[string]uint64)
+	stream.ActorStop = stop
+	if stream.Timers == nil {
+		stream.Timers = make(map[string]streamTimerRegistration)
 	}
 	if strings.TrimSpace(string(stream.Phase)) == "" {
 		stream.Phase = TurnPhaseIdle
 	}
 	stream.mu.Unlock()
-	go service.runStreamActor(stream, mailbox, done)
+	go service.runStreamActor(stream, mailbox, done, stop)
 	return mailbox, done, nil
 }
 
@@ -275,21 +291,27 @@ func (service *Service) postStreamCommandAsync(stream *ActiveStream, command str
 	}
 }
 
-func (service *Service) runStreamActor(stream *ActiveStream, mailbox <-chan streamCommandEnvelope, done chan struct{}) {
+func (service *Service) runStreamActor(stream *ActiveStream, mailbox <-chan streamCommandEnvelope, done chan struct{}, stop <-chan struct{}) {
 	defer close(done)
+	defer releaseTerminalStreamState(stream)
+	defer clearAllStreamTimers(stream)
 	for {
-		envelope, ok := <-mailbox
-		if !ok {
+		select {
+		case <-stop:
 			return
-		}
-		err := service.handleStreamCommand(stream, envelope.command)
-		if envelope.result != nil {
-			envelope.result <- err
-		} else if err != nil {
-			_ = service.failStream(stream, "unknown", err)
-		}
-		if shouldStopStreamActor(stream) {
-			return
+		case envelope, ok := <-mailbox:
+			if !ok {
+				return
+			}
+			err := service.handleStreamCommand(stream, envelope.command)
+			if envelope.result != nil {
+				envelope.result <- err
+			} else if err != nil {
+				_ = service.failStream(stream, "unknown", err)
+			}
+			if shouldStopStreamActor(stream) {
+				return
+			}
 		}
 	}
 }
@@ -309,6 +331,45 @@ func shouldStopStreamActor(stream *ActiveStream) bool {
 	default:
 		return false
 	}
+}
+
+func releaseTerminalStreamState(stream *ActiveStream) {
+	if stream == nil {
+		return
+	}
+	stream.mu.Lock()
+	stream.ProviderCancel = nil
+	stream.ProviderActive = false
+	stream.PendingProviderAction = providerActionNone
+	stream.PendingProviderCompletion = nil
+	stream.PendingCompaction = nil
+	stream.CheckpointConversation = nil
+	stream.ProviderAccumulatedText = nil
+	stream.ProviderAccumulatedReasoning = nil
+	stream.ProviderAccumulatedReasoningSignature = ""
+	stream.ProviderAccumulatedReasoningSignatureSource = ""
+	stream.ProviderAccumulatedReasoningItemID = ""
+	stream.ProviderAccumulatedReasoningStatus = ""
+	stream.ProviderAccumulatedReasoningSummary = nil
+	stream.ProviderFinishReason = ""
+	stream.ProviderUsage = turnUsageSnapshot{}
+	stream.ProviderTerminalToolInvocation = false
+	stream.ToolInvocationCount = 0
+	stream.PendingExecs = nil
+	stream.PendingInteractions = nil
+	stream.PartialToolCallIDs = nil
+	stream.PatchEditQueues = nil
+	stream.MCPToolServers = nil
+	stream.WorkspacePaths = nil
+	stream.TerminalsFolder = ""
+	stream.RequestFileContents = nil
+	stream.RecentCompletedExecs = nil
+	stream.BackgroundShells = nil
+	stream.BackgroundShellsByMessageID = nil
+	stream.BackgroundShellsByExecID = nil
+	stream.BackgroundShellActions = nil
+	stream.UpdatedAt = time.Now().UTC()
+	stream.mu.Unlock()
 }
 
 func (service *Service) handleStreamCommand(stream *ActiveStream, command streamCommand) error {
@@ -480,15 +541,37 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 	switch event.Kind {
 	case modeladapter.ModelEventKindTextDelta:
 		stream.mu.Lock()
-		stream.ProviderAccumulatedText += event.Text
-		stream.UpdatedAt = time.Now().UTC()
+		var err error
+		stream.ProviderAccumulatedText, err = appendProviderOutput(
+			stream.ProviderAccumulatedText,
+			event.Text,
+			providerAccumulatedTextMaxBytes,
+			"text",
+		)
+		if err == nil {
+			stream.UpdatedAt = time.Now().UTC()
+		}
 		stream.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return service.broker.Publish(requestID, StreamEvent{Message: buildTextDeltaMessage(event.Text)})
 	case modeladapter.ModelEventKindThinkingDelta:
 		stream.mu.Lock()
-		stream.ProviderAccumulatedReasoning += event.Text
-		stream.UpdatedAt = time.Now().UTC()
+		var err error
+		stream.ProviderAccumulatedReasoning, err = appendProviderOutput(
+			stream.ProviderAccumulatedReasoning,
+			event.Text,
+			providerAccumulatedReasoningMaxBytes,
+			"reasoning",
+		)
+		if err == nil {
+			stream.UpdatedAt = time.Now().UTC()
+		}
 		stream.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return service.broker.Publish(requestID, StreamEvent{Message: buildThinkingDeltaMessage(event.Text, event.ThinkingStyle)})
 	case modeladapter.ModelEventKindThinkingCompleted:
 		shouldEmitSyntheticThinking := false
@@ -501,7 +584,7 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 			stream.ProviderAccumulatedReasoningItemID = strings.TrimSpace(event.ProviderItemID)
 			stream.ProviderAccumulatedReasoningStatus = strings.TrimSpace(event.ProviderStatus)
 			stream.ProviderAccumulatedReasoningSummary = append([]byte(nil), event.ProviderSummary...)
-			shouldEmitSyntheticThinking = strings.TrimSpace(stream.ProviderAccumulatedReasoning) == "" &&
+			shouldEmitSyntheticThinking = len(bytes.TrimSpace(stream.ProviderAccumulatedReasoning)) == 0 &&
 				strings.TrimSpace(event.ThinkingSignatureSource) == modeladapter.ReasoningSignatureSourceOpenAIResponses
 			if shouldEmitSyntheticThinking {
 				if stream.ProviderSyntheticThinkingStartedAt.IsZero() {
@@ -561,14 +644,14 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 			Message: buildToolCallDeltaMessage(event.ToolCallID, modelCallID, event.ToolCallDelta),
 		})
 	case modeladapter.ModelEventKindToolLikeCompleted:
-		reasoningForTool := accumulatedReasoning
+		reasoningForTool := string(accumulatedReasoning)
 		reasoningSignatureForTool := accumulatedReasoningSignature
 		reasoningSignatureSourceForTool := accumulatedReasoningSignatureSource
 		reasoningItemIDForTool := accumulatedReasoningItemID
 		reasoningStatusForTool := accumulatedReasoningStatus
 		reasoningSummaryForTool := append([]byte(nil), accumulatedReasoningSummary...)
-		if strings.TrimSpace(accumulatedText) != "" {
-			if err := service.flushAssistantText(stream, conversationID, turnSeq, requestID, accumulatedText, accumulatedReasoning, accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, false); err != nil {
+		if len(bytes.TrimSpace(accumulatedText)) > 0 {
+			if err := service.flushAssistantText(stream, conversationID, turnSeq, requestID, string(accumulatedText), reasoningForTool, accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, false); err != nil {
 				return err
 			}
 		}
@@ -584,7 +667,7 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 		invocation.ReasoningProviderSummary = reasoningSummaryForTool
 		invocation.ModelCallID = modelCallID
 		stream.mu.Lock()
-		stream.ProviderAccumulatedText = ""
+		stream.ProviderAccumulatedText = nil
 		stream.UpdatedAt = time.Now().UTC()
 		stream.mu.Unlock()
 		return service.handleToolInvocation(stream, invocation)
@@ -613,6 +696,32 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 	default:
 		return nil
 	}
+}
+
+func appendProviderOutput(current []byte, delta string, maxBytes int, outputKind string) ([]byte, error) {
+	if delta == "" {
+		return current, nil
+	}
+	if maxBytes <= 0 || len(delta) > maxBytes-len(current) {
+		return current, fmt.Errorf("provider %s output exceeded %d-byte limit", strings.TrimSpace(outputKind), maxBytes)
+	}
+	required := len(current) + len(delta)
+	if required <= cap(current) {
+		return append(current, delta...), nil
+	}
+	nextCapacity := cap(current) * 2
+	if nextCapacity < 4<<10 {
+		nextCapacity = 4 << 10
+	}
+	if nextCapacity < required {
+		nextCapacity = required
+	}
+	if nextCapacity > maxBytes {
+		nextCapacity = maxBytes
+	}
+	expanded := make([]byte, len(current), nextCapacity)
+	copy(expanded, current)
+	return append(expanded, delta...), nil
 }
 
 func (service *Service) rewriteTaskToolCallModelForDisplay(stream *ActiveStream, toolCall *agentv1.ToolCall) *agentv1.ToolCall {
@@ -701,8 +810,8 @@ func (service *Service) handleProviderDoneEvent(stream *ActiveStream, payload *s
 	stream.ProviderActive = false
 	stream.ProviderCancel = nil
 	stream.PendingProviderAction = providerActionNone
-	stream.ProviderAccumulatedText = ""
-	stream.ProviderAccumulatedReasoning = ""
+	stream.ProviderAccumulatedText = nil
+	stream.ProviderAccumulatedReasoning = nil
 	stream.ProviderAccumulatedReasoningSignature = ""
 	stream.ProviderAccumulatedReasoningSignatureSource = ""
 	stream.ProviderAccumulatedReasoningItemID = ""
@@ -723,12 +832,12 @@ func (service *Service) handleProviderDoneEvent(stream *ActiveStream, payload *s
 		var providerErr providerTerminalError
 		if errors.As(payload.Err, &providerErr) {
 			service.setTurnPhase(stream, TurnPhaseFailed)
-			return service.closeStreamWithProviderError(stream, conversationID, turnSeq, requestID, accumulatedText, accumulatedReasoning, accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, usage, providerErr, !hadToolInvocation)
+			return service.closeStreamWithProviderError(stream, conversationID, turnSeq, requestID, string(accumulatedText), string(accumulatedReasoning), accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, usage, providerErr, !hadToolInvocation)
 		}
 		service.setTurnPhase(stream, TurnPhaseFailed)
 		return service.failStream(stream, "unknown", payload.Err)
 	}
-	if err := service.flushAssistantText(stream, conversationID, turnSeq, requestID, accumulatedText, accumulatedReasoning, accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, !hadToolInvocation); err != nil {
+	if err := service.flushAssistantText(stream, conversationID, turnSeq, requestID, string(accumulatedText), string(accumulatedReasoning), accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, !hadToolInvocation); err != nil {
 		return service.failStreamIfNonTerminal(stream, "unknown", err)
 	}
 	if err := service.recordTurnUsageSnapshot(stream, conversationID, turnSeq, requestID, modelCallID, "completed", usage, "", false); err != nil {
@@ -766,7 +875,7 @@ func (service *Service) handleProviderDoneEvent(stream *ActiveStream, payload *s
 	}
 
 	if existingCompletion == nil {
-		handled, err := service.handleSubagentEmptyStopAfterToolResult(stream, conversationID, turnSeq, requestID, modelCallID, finishReason, accumulatedText)
+		handled, err := service.handleSubagentEmptyStopAfterToolResult(stream, conversationID, turnSeq, requestID, modelCallID, finishReason, string(accumulatedText))
 		if err != nil {
 			return service.failStreamIfNonTerminal(stream, "unknown", err)
 		}
@@ -919,25 +1028,41 @@ func (service *Service) scheduleStreamTimer(stream *ActiveStream, key string, de
 	if stream == nil || strings.TrimSpace(key) == "" {
 		return
 	}
-	stream.mu.Lock()
-	if stream.TimerTokens == nil {
-		stream.TimerTokens = make(map[string]uint64)
+	if delay < 0 {
+		delay = 0
 	}
-	stream.TimerTokens[key]++
-	token := stream.TimerTokens[key]
+	normalizedKey := strings.TrimSpace(key)
+	done := make(chan struct{})
+	timer := time.NewTimer(delay)
+
+	stream.mu.Lock()
+	if stream.Timers == nil {
+		stream.Timers = make(map[string]streamTimerRegistration)
+	}
+	previous, hadPrevious := stream.Timers[normalizedKey]
+	stream.NextTimerToken++
+	token := stream.NextTimerToken
+	stream.Timers[normalizedKey] = streamTimerRegistration{
+		Token: token,
+		Timer: timer,
+		Done:  done,
+	}
 	stream.UpdatedAt = time.Now().UTC()
 	stream.mu.Unlock()
 
+	if hadPrevious {
+		stopStreamTimerRegistration(previous)
+	}
 	go func() {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			<-timer.C
+		select {
+		case <-done:
+			return
+		case <-timer.C:
 		}
 		if err := service.postStreamCommandAsync(stream, streamCommand{
 			Kind: streamCommandTimerFired,
 			Timer: &streamTimerEvent{
-				Key:       key,
+				Key:       normalizedKey,
 				Kind:      kind,
 				Token:     token,
 				ExecID:    strings.TrimSpace(execID),
@@ -945,7 +1070,7 @@ func (service *Service) scheduleStreamTimer(stream *ActiveStream, key string, de
 				Reason:    strings.TrimSpace(reason),
 			},
 		}); err != nil && !errors.Is(err, errProviderLoopInterrupted) {
-			log.Printf("forwarder timer post failed request_id=%s key=%s err=%v", strings.TrimSpace(stream.RequestID), strings.TrimSpace(key), err)
+			log.Printf("forwarder timer post failed request_id=%s key=%s err=%v", strings.TrimSpace(stream.RequestID), normalizedKey, err)
 		}
 	}()
 }
@@ -956,17 +1081,53 @@ func timerEventMatches(stream *ActiveStream, payload *streamTimerEvent) bool {
 	}
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
-	return stream.TimerTokens[payload.Key] == payload.Token
+	registration, ok := stream.Timers[strings.TrimSpace(payload.Key)]
+	return ok && registration.Token == payload.Token
 }
 
 func clearStreamTimer(stream *ActiveStream, key string) {
 	if stream == nil || strings.TrimSpace(key) == "" {
 		return
 	}
+	normalizedKey := strings.TrimSpace(key)
 	stream.mu.Lock()
-	delete(stream.TimerTokens, key)
-	stream.UpdatedAt = time.Now().UTC()
+	registration, ok := stream.Timers[normalizedKey]
+	if ok {
+		delete(stream.Timers, normalizedKey)
+		stream.UpdatedAt = time.Now().UTC()
+	}
 	stream.mu.Unlock()
+	if ok {
+		stopStreamTimerRegistration(registration)
+	}
+}
+
+func clearAllStreamTimers(stream *ActiveStream) {
+	if stream == nil {
+		return
+	}
+	stream.mu.Lock()
+	registrations := make([]streamTimerRegistration, 0, len(stream.Timers))
+	for key, registration := range stream.Timers {
+		registrations = append(registrations, registration)
+		delete(stream.Timers, key)
+	}
+	if len(registrations) > 0 {
+		stream.UpdatedAt = time.Now().UTC()
+	}
+	stream.mu.Unlock()
+	for _, registration := range registrations {
+		stopStreamTimerRegistration(registration)
+	}
+}
+
+func stopStreamTimerRegistration(registration streamTimerRegistration) {
+	if registration.Timer != nil {
+		registration.Timer.Stop()
+	}
+	if registration.Done != nil {
+		close(registration.Done)
+	}
 }
 
 func (service *Service) handleTimerEvent(stream *ActiveStream, payload *streamTimerEvent) error {

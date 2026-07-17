@@ -31,7 +31,7 @@ type anthropicToolAccumulator struct {
 	Name                   string
 	Args                   strings.Builder
 	LastEmittedPath        string
-	LastStreamContent      string
+	ToolProgress           *incrementalToolProgress
 	LastCreatePlanSnapshot string
 }
 
@@ -146,6 +146,15 @@ func NewAnthropicAdapter() *AnthropicAdapter {
 	return &AnthropicAdapter{
 		client: netproxy.NewHTTPClient(0),
 	}
+}
+
+// Close 释放适配器持有的 HTTP transport。
+func (adapter *AnthropicAdapter) Close() {
+	if adapter == nil {
+		return
+	}
+	netproxy.CloseHTTPClient(adapter.client)
+	adapter.client = nil
 }
 
 func anthropicEndpointURL(baseURL string) string {
@@ -1493,27 +1502,44 @@ func emitAnthropicToolProgress(
 		return nil
 	}
 	toolName := strings.TrimSpace(accumulator.Name)
+	if toolName != "CreatePlan" && toolName != "Write" && toolName != "PatchEdit" {
+		return nil
+	}
+
+	progress := accumulator.ToolProgress
+	if progress == nil {
+		progress = newIncrementalToolProgress(toolName)
+		if progress == nil {
+			return nil
+		}
+		progress.Consume(accumulator.Args.String())
+		accumulator.ToolProgress = progress
+	} else {
+		progress.Consume(argsTextDelta)
+	}
 	if toolName == "CreatePlan" {
+		args, ok := progress.CreatePlanArgs()
+		if progress.Complete() {
+			if completeArgs, err := runtimecore.DecodeCreatePlanArgsJSON([]byte(accumulator.Args.String())); err == nil {
+				args = completeArgs
+				ok = hasCreatePlanArgsProgress(args)
+			}
+		}
+		if !ok {
+			return nil
+		}
 		return emitCreatePlanToolProgress(
 			sink,
 			"anthropic",
 			model,
 			accumulator.CallID,
-			accumulator.Args.String(),
+			args,
 			argsTextDelta,
 			&accumulator.LastCreatePlanSnapshot,
 		)
 	}
-	if toolName != "Write" && toolName != "PatchEdit" {
-		return nil
-	}
-
-	rawArgs := accumulator.Args.String()
-	path, pathFound, pathComplete := extractJSONStringFieldPrefix(rawArgs, "path")
-	if !pathFound {
-		path, pathFound, pathComplete = extractJSONStringFieldPrefix(rawArgs, "file_path")
-	}
-	if pathFound && pathComplete {
+	path, pathComplete := progress.Path()
+	if pathComplete {
 		trimmedPath := strings.TrimSpace(path)
 		if trimmedPath != "" {
 			pathChanged := trimmedPath != accumulator.LastEmittedPath
@@ -1557,15 +1583,10 @@ func emitAnthropicToolProgress(
 			}
 		}
 	}
-	streamContent, streamFound := extractToolStreamContentPrefix(rawArgs, toolName)
-	if !streamFound {
-		return nil
-	}
-	delta := suffixAfterCommonPrefix(accumulator.LastStreamContent, streamContent)
+	delta := progress.TakeContentDelta(toolName)
 	if delta == "" {
 		return nil
 	}
-	accumulator.LastStreamContent = streamContent
 	return sink(ModelEvent{
 		Kind:       ModelEventKindToolCallDelta,
 		OccurredAt: time.Now().UTC(),
@@ -1596,6 +1617,324 @@ func isEmptyAnthropicToolInput(input any) bool {
 	default:
 		return false
 	}
+}
+
+type incrementalJSONScanState uint8
+
+const (
+	incrementalJSONScanNormal incrementalJSONScanState = iota
+	incrementalJSONScanKey
+	incrementalJSONScanAfterKey
+	incrementalJSONScanBeforeValue
+	incrementalJSONScanSkipString
+	incrementalJSONScanStringValue
+)
+
+type incrementalJSONField struct {
+	retain    bool
+	emitDelta bool
+	found     bool
+	complete  bool
+	value     strings.Builder
+	delta     strings.Builder
+}
+
+type incrementalToolProgress struct {
+	fields       map[string]*incrementalJSONField
+	state        incrementalJSONScanState
+	depth        int
+	rootComplete bool
+
+	key           strings.Builder
+	keyEscape     bool
+	pendingField  *incrementalJSONField
+	valueField    *incrementalJSONField
+	valueEscape   bool
+	unicodeValue  uint16
+	unicodeDigits int
+	highSurrogate rune
+	skipEscape    bool
+}
+
+func newIncrementalToolProgress(toolName string) *incrementalToolProgress {
+	fields := map[string]*incrementalJSONField{}
+	switch strings.TrimSpace(toolName) {
+	case "CreatePlan":
+		for _, field := range []string{"plan", "overview", "name"} {
+			fields[field] = &incrementalJSONField{retain: true}
+		}
+	case "PatchEdit":
+		fields["path"] = &incrementalJSONField{retain: true}
+		fields["file_path"] = &incrementalJSONField{retain: true}
+		fields["new_string"] = &incrementalJSONField{emitDelta: true}
+	case "Write":
+		fields["path"] = &incrementalJSONField{retain: true}
+		fields["file_path"] = &incrementalJSONField{retain: true}
+		for _, field := range []string{"contents", "content", "stream_content", "streamContent"} {
+			fields[field] = &incrementalJSONField{emitDelta: true}
+		}
+	default:
+		return nil
+	}
+	return &incrementalToolProgress{fields: fields}
+}
+
+func (progress *incrementalToolProgress) Consume(chunk string) {
+	if progress == nil || chunk == "" {
+		return
+	}
+	for index := 0; index < len(chunk); index++ {
+		character := chunk[index]
+		switch progress.state {
+		case incrementalJSONScanKey:
+			progress.consumeKeyByte(character)
+		case incrementalJSONScanAfterKey:
+			if isJSONWhitespace(character) {
+				continue
+			}
+			if character == ':' {
+				progress.state = incrementalJSONScanBeforeValue
+				continue
+			}
+			progress.pendingField = nil
+			progress.state = incrementalJSONScanNormal
+			progress.consumeStructuralByte(character)
+		case incrementalJSONScanBeforeValue:
+			if isJSONWhitespace(character) {
+				continue
+			}
+			if character == '"' {
+				if progress.pendingField != nil {
+					progress.valueField = progress.pendingField
+					progress.valueField.found = true
+					progress.valueEscape = false
+					progress.unicodeDigits = 0
+					progress.unicodeValue = 0
+					progress.highSurrogate = 0
+					progress.state = incrementalJSONScanStringValue
+				} else {
+					progress.skipEscape = false
+					progress.state = incrementalJSONScanSkipString
+				}
+				progress.pendingField = nil
+				continue
+			}
+			progress.pendingField = nil
+			progress.state = incrementalJSONScanNormal
+			progress.consumeStructuralByte(character)
+		case incrementalJSONScanSkipString:
+			if progress.skipEscape {
+				progress.skipEscape = false
+				continue
+			}
+			if character == '\\' {
+				progress.skipEscape = true
+				continue
+			}
+			if character == '"' {
+				progress.state = incrementalJSONScanNormal
+			}
+		case incrementalJSONScanStringValue:
+			progress.consumeValueByte(character)
+		default:
+			progress.consumeStructuralByte(character)
+		}
+	}
+}
+
+func (progress *incrementalToolProgress) consumeStructuralByte(character byte) {
+	switch character {
+	case '{', '[':
+		progress.depth++
+	case '}', ']':
+		if progress.depth > 0 {
+			progress.depth--
+			if progress.depth == 0 {
+				progress.rootComplete = true
+			}
+		}
+	case '"':
+		if progress.depth == 1 {
+			progress.key.Reset()
+			progress.keyEscape = false
+			progress.state = incrementalJSONScanKey
+			return
+		}
+		progress.skipEscape = false
+		progress.state = incrementalJSONScanSkipString
+	}
+}
+
+func (progress *incrementalToolProgress) consumeKeyByte(character byte) {
+	if progress.keyEscape {
+		progress.key.WriteByte(character)
+		progress.keyEscape = false
+		return
+	}
+	if character == '\\' {
+		progress.keyEscape = true
+		return
+	}
+	if character != '"' {
+		progress.key.WriteByte(character)
+		return
+	}
+	progress.pendingField = progress.fields[progress.key.String()]
+	progress.state = incrementalJSONScanAfterKey
+}
+
+func (progress *incrementalToolProgress) consumeValueByte(character byte) {
+	field := progress.valueField
+	if field == nil {
+		progress.state = incrementalJSONScanNormal
+		return
+	}
+	if progress.unicodeDigits > 0 {
+		nibble, ok := jsonHexNibble(character)
+		if !ok {
+			progress.unicodeDigits = 0
+			progress.unicodeValue = 0
+			return
+		}
+		progress.unicodeValue = progress.unicodeValue<<4 | uint16(nibble)
+		progress.unicodeDigits--
+		if progress.unicodeDigits == 0 {
+			progress.appendDecodedRune(field, rune(progress.unicodeValue))
+			progress.unicodeValue = 0
+		}
+		return
+	}
+	if progress.valueEscape {
+		progress.valueEscape = false
+		switch character {
+		case '"', '\\', '/':
+			progress.appendDecodedByte(field, character)
+		case 'b':
+			progress.appendDecodedByte(field, '\b')
+		case 'f':
+			progress.appendDecodedByte(field, '\f')
+		case 'n':
+			progress.appendDecodedByte(field, '\n')
+		case 'r':
+			progress.appendDecodedByte(field, '\r')
+		case 't':
+			progress.appendDecodedByte(field, '\t')
+		case 'u':
+			progress.unicodeDigits = 4
+			progress.unicodeValue = 0
+		default:
+			progress.appendDecodedByte(field, character)
+		}
+		return
+	}
+	if character == '\\' {
+		progress.valueEscape = true
+		return
+	}
+	if character == '"' {
+		field.complete = true
+		progress.valueField = nil
+		progress.state = incrementalJSONScanNormal
+		return
+	}
+	progress.appendDecodedByte(field, character)
+}
+
+func (progress *incrementalToolProgress) appendDecodedRune(field *incrementalJSONField, value rune) {
+	if utf16.IsSurrogate(value) {
+		if value >= 0xD800 && value <= 0xDBFF {
+			progress.highSurrogate = value
+			return
+		}
+		if progress.highSurrogate != 0 {
+			value = utf16.DecodeRune(progress.highSurrogate, value)
+			progress.highSurrogate = 0
+		}
+	} else if progress.highSurrogate != 0 {
+		progress.highSurrogate = 0
+	}
+	if field.retain {
+		field.value.WriteRune(value)
+	}
+	if field.emitDelta {
+		field.delta.WriteRune(value)
+	}
+}
+
+func (progress *incrementalToolProgress) appendDecodedByte(field *incrementalJSONField, value byte) {
+	if field.retain {
+		field.value.WriteByte(value)
+	}
+	if field.emitDelta {
+		field.delta.WriteByte(value)
+	}
+}
+
+func jsonHexNibble(character byte) (byte, bool) {
+	switch {
+	case character >= '0' && character <= '9':
+		return character - '0', true
+	case character >= 'a' && character <= 'f':
+		return character - 'a' + 10, true
+	case character >= 'A' && character <= 'F':
+		return character - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func (progress *incrementalToolProgress) CreatePlanArgs() (*agentv1.CreatePlanArgs, bool) {
+	if progress == nil {
+		return nil, false
+	}
+	args := &agentv1.CreatePlanArgs{}
+	if field := progress.fields["plan"]; field != nil && field.found {
+		args.Plan = field.value.String()
+	}
+	if field := progress.fields["overview"]; field != nil && field.found {
+		args.Overview = field.value.String()
+	}
+	if field := progress.fields["name"]; field != nil && field.complete {
+		args.Name = strings.TrimSpace(field.value.String())
+	}
+	return args, hasCreatePlanArgsProgress(args)
+}
+
+func (progress *incrementalToolProgress) Complete() bool {
+	return progress != nil && progress.rootComplete
+}
+
+func (progress *incrementalToolProgress) Path() (string, bool) {
+	if progress == nil {
+		return "", false
+	}
+	for _, name := range []string{"path", "file_path"} {
+		field := progress.fields[name]
+		if field != nil && field.complete {
+			return field.value.String(), true
+		}
+	}
+	return "", false
+}
+
+func (progress *incrementalToolProgress) TakeContentDelta(toolName string) string {
+	if progress == nil {
+		return ""
+	}
+	fields := []string{"new_string"}
+	if strings.TrimSpace(toolName) == "Write" {
+		fields = []string{"contents", "content", "stream_content", "streamContent"}
+	}
+	for _, name := range fields {
+		field := progress.fields[name]
+		if field == nil || field.delta.Len() == 0 {
+			continue
+		}
+		delta := field.delta.String()
+		field.delta.Reset()
+		return delta
+	}
+	return ""
 }
 
 func extractJSONStringFieldPrefix(input string, field string) (string, bool, bool) {
@@ -1696,37 +2035,6 @@ func decodeUnicodeEscape(input string) (rune, int, bool) {
 		return decoded, 12, true
 	}
 	return r, 6, true
-}
-
-func suffixAfterCommonPrefix(previous string, current string) string {
-	if previous == "" {
-		return current
-	}
-	maxPrefix := len(previous)
-	if len(current) < maxPrefix {
-		maxPrefix = len(current)
-	}
-	index := 0
-	for index < maxPrefix && previous[index] == current[index] {
-		index++
-	}
-	return current[index:]
-}
-
-func extractToolStreamContentPrefix(rawArgs string, toolName string) (string, bool) {
-	switch strings.TrimSpace(toolName) {
-	case "PatchEdit":
-		if value, found, _ := extractJSONStringFieldPrefix(rawArgs, "new_string"); found {
-			return value, true
-		}
-	case "Write":
-		for _, field := range []string{"contents", "content", "stream_content", "streamContent"} {
-			if value, found, _ := extractJSONStringFieldPrefix(rawArgs, field); found {
-				return value, true
-			}
-		}
-	}
-	return "", false
 }
 
 func isJSONWhitespace(character byte) bool {

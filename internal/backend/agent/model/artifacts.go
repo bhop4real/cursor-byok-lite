@@ -78,10 +78,10 @@ func buildLLMSummaryPayload(
 
 // appendLLMResponseArtifact 追加模型调用的原始响应文本。
 func appendLLMResponseArtifact(req StreamRequest, chunk string) (string, error) {
-	if req.Observer == nil {
+	if req.RawResponseObserver == nil {
 		return "", nil
 	}
-	path, err := req.Observer.AppendLLMResponseChunk(req.RequestID, req.RunID, req.ModelCallID, chunk)
+	path, err := req.RawResponseObserver.AppendLLMResponseChunk(req.RequestID, req.RunID, req.ModelCallID, chunk)
 	if err == nil && req.ArtifactPaths != nil {
 		req.ArtifactPaths.ResponsePath = path
 	}
@@ -147,11 +147,14 @@ func truncateArtifactText(text string, maxRunes int) string {
 	if trimmed == "" || maxRunes <= 0 {
 		return ""
 	}
-	runes := []rune(trimmed)
-	if len(runes) <= maxRunes {
-		return trimmed
+	runeCount := 0
+	for byteIndex := range trimmed {
+		if runeCount == maxRunes {
+			return trimmed[:byteIndex] + "..."
+		}
+		runeCount++
 	}
-	return string(runes[:maxRunes]) + "..."
+	return trimmed
 }
 
 // normalizeModelArtifactTime 把时间格式化为 RFC3339Nano。

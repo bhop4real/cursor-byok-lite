@@ -58,6 +58,37 @@ func NewTransport(base *http.Transport) *http.Transport {
 	return transport
 }
 
+// CloseHTTPClient releases a client transport owned by the caller.
+func CloseHTTPClient(client *http.Client) {
+	if client == nil {
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		CloseTransport(transport)
+		return
+	}
+	client.CloseIdleConnections()
+}
+
+// CloseTransport unregisters an owned transport and closes its idle connections.
+func CloseTransport(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
+	proxyTransports.Delete(transport)
+	transport.CloseIdleConnections()
+}
+
+// CloseIdleConnections closes idle connections on all currently registered transports.
+func CloseIdleConnections() {
+	proxyTransports.Range(func(key any, _ any) bool {
+		if transport, ok := key.(*http.Transport); ok && transport != nil {
+			transport.CloseIdleConnections()
+		}
+		return true
+	})
+}
+
 // ProxyForRequest resolves the proxy URL for a single request.
 func ProxyForRequest(req *http.Request) (*url.URL, error) {
 	if req == nil || req.URL == nil {
@@ -309,12 +340,7 @@ func statusFromSnapshot(snapshot proxySnapshot) Status {
 }
 
 func closeIdleProxyConnections() {
-	proxyTransports.Range(func(key any, _ any) bool {
-		if transport, ok := key.(*http.Transport); ok && transport != nil {
-			transport.CloseIdleConnections()
-		}
-		return true
-	})
+	CloseIdleConnections()
 }
 
 func cloneDefaultTransport() *http.Transport {

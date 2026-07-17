@@ -106,6 +106,7 @@ const (
 )
 
 type StreamEvent struct {
+	Sequence             uint64
 	Message              *agentv1.AgentServerMessage
 	End                  bool
 	TerminalErrorCode    string
@@ -114,6 +115,7 @@ type StreamEvent struct {
 
 type StreamSubscriber struct {
 	Signal chan struct{}
+	Cursor uint64
 }
 
 type ActiveStream struct {
@@ -137,14 +139,17 @@ type ActiveStream struct {
 	ToolInvocationCount                         int
 	ActorMailbox                                chan streamCommandEnvelope
 	ActorDone                                   chan struct{}
+	ActorStop                                   chan struct{}
+	ActorStopping                               bool
 	Phase                                       TurnPhase
 	PendingProviderAction                       providerAction
 	PendingProviderCompletion                   *pendingTurnCompletion
 	CurrentProviderToken                        uint64
 	CurrentCompactionToken                      uint64
-	TimerTokens                                 map[string]uint64
-	ProviderAccumulatedText                     string
-	ProviderAccumulatedReasoning                string
+	NextTimerToken                              uint64
+	Timers                                      map[string]streamTimerRegistration
+	ProviderAccumulatedText                     []byte
+	ProviderAccumulatedReasoning                []byte
 	ProviderAccumulatedReasoningSignature       string
 	ProviderAccumulatedReasoningSignatureSource string
 	ProviderAccumulatedReasoningItemID          string
@@ -158,6 +163,9 @@ type ActiveStream struct {
 	PendingCompaction                           *PendingCompaction
 
 	Backlog                     []StreamEvent
+	BacklogFirstSequence        uint64
+	NextBacklogSequence         uint64
+	LatestCheckpoint            *StreamEvent
 	Subscribers                 map[string]*StreamSubscriber
 	CheckpointConversation      *ConversationFile
 	PendingExecs                map[string]runtimecore.PendingExec
@@ -192,10 +200,12 @@ type BackgroundShellState struct {
 	ArgsJSON           []byte
 	Status             string
 	ExitCode           *int32
-	StdoutBuffer       string
-	StderrBuffer       string
-	AwaitStdoutOffset  int
-	AwaitStderrOffset  int
+	StdoutBuffer       []byte
+	StderrBuffer       []byte
+	StdoutDroppedBytes int64
+	StderrDroppedBytes int64
+	AwaitStdoutOffset  int64
+	AwaitStderrOffset  int64
 	CreatedAt          time.Time
 	LastActivityAt     time.Time
 	CompletedAt        time.Time
@@ -250,6 +260,7 @@ type ProviderRequest struct {
 	RequestKnobs        map[string]any
 	CompileSummary      string
 	Observer            modeladapter.LLMArtifactObserver
+	RawResponseObserver modeladapter.LLMArtifactObserver
 	ArtifactPaths       *modeladapter.LLMArtifactPaths
 	RequestBodyOverride map[string]any
 }

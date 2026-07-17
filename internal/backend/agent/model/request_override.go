@@ -22,24 +22,6 @@ func cloneRequestBodyOverride(input map[string]any) map[string]any {
 	return cloned
 }
 
-func requestBodyToMap(input any) (map[string]any, error) {
-	if body, ok := input.(map[string]any); ok {
-		return body, nil
-	}
-	payload, err := json.Marshal(input)
-	if err != nil {
-		return nil, err
-	}
-	var body map[string]any
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return nil, err
-	}
-	if body == nil {
-		body = map[string]any{}
-	}
-	return body, nil
-}
-
 func ApplyOpenAIExtraParams(body map[string]any, enabled bool, paramsJSON string) error {
 	return applyExtraParams(body, enabled, paramsJSON, "openai extra params json")
 }

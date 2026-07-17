@@ -63,6 +63,15 @@ func NewBridge() *Bridge {
 	}
 }
 
+// Close 释放交互桥持有的 HTTP transport。
+func (bridge *Bridge) Close() {
+	if bridge == nil {
+		return
+	}
+	netproxy.CloseHTTPClient(bridge.httpClient)
+	bridge.httpClient = nil
+}
+
 // OpenQuery 打开一条交互型工具调用。
 func (bridge *Bridge) OpenQuery(toolCall runtimecore.ToolInvocation) (*agentv1.AgentServerMessage, runtimecore.PendingInteraction, error) {
 	switch toolCall.ToolName {

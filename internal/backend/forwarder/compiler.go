@@ -15,6 +15,10 @@ type PromptCompiler interface {
 	DerivePromptContexts(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string) ([]PromptContextMessage, error)
 }
 
+type replayPromptCompiler interface {
+	CompileWithReplay(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string, replayMessages []modeladapter.Message) (CompiledConversation, error)
+}
+
 type DefaultPromptCompiler struct {
 	projector *HistoryProjector
 	catalog   ToolCatalog
@@ -34,7 +38,19 @@ func NewPromptCompiler(projector *HistoryProjector, catalog ToolCatalog, reminde
 
 // Compile 生成当前 turn 应发送给 provider 的消息和工具集合。
 func (compiler *DefaultPromptCompiler) Compile(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string) (CompiledConversation, error) {
-	if compiler == nil || compiler.projector == nil || compiler.catalog == nil {
+	if compiler == nil || compiler.projector == nil {
+		return CompiledConversation{}, fmt.Errorf("prompt compiler dependencies are not initialized")
+	}
+	replayMessages, err := compiler.projector.ProjectPromptReplay(conversation)
+	if err != nil {
+		return CompiledConversation{}, err
+	}
+	return compiler.CompileWithReplay(conversation, mode, latestUserText, modelName, replayMessages)
+}
+
+// CompileWithReplay 复用已投影的 replay 生成 provider 请求。
+func (compiler *DefaultPromptCompiler) CompileWithReplay(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string, replayMessages []modeladapter.Message) (CompiledConversation, error) {
+	if compiler == nil || compiler.catalog == nil {
 		return CompiledConversation{}, fmt.Errorf("prompt compiler dependencies are not initialized")
 	}
 	normalizedMode, err := validateSupportedActiveMode(mode)
@@ -54,10 +70,6 @@ func (compiler *DefaultPromptCompiler) Compile(conversation *ConversationFile, m
 		return CompiledConversation{}, err
 	}
 	tools, _, err := compiler.catalog.Load(normalizedMode, subagentTypeName)
-	if err != nil {
-		return CompiledConversation{}, err
-	}
-	replayMessages, err := compiler.projector.ProjectPromptReplay(conversation)
 	if err != nil {
 		return CompiledConversation{}, err
 	}
@@ -146,13 +158,11 @@ func (compiler *DefaultPromptCompiler) stableReplayMessageCount(conversation *Co
 	}
 	stableCount := 0
 	if currentTurnSeq > 0 {
-		stableConversation := cloneConversationFile(conversation)
-		stableConversation.Entries = stableReplayEntriesBeforeTurn(conversation.Entries, currentTurnSeq)
-		stableMessages, err := compiler.projector.ProjectPromptReplay(stableConversation)
+		count, err := compiler.projector.StablePromptReplayMessageCount(conversation, currentTurnSeq)
 		if err != nil {
 			return 0, err
 		}
-		stableCount = len(stableMessages)
+		stableCount = count
 	}
 	if requestPrefixReplayCount := replayMessageCountFromRequestPrefix(conversation); requestPrefixReplayCount > stableCount {
 		stableCount = requestPrefixReplayCount

@@ -248,10 +248,14 @@ type PendingExec struct {
 	ShellForegroundDeadline time.Time
 	// ShellRecoveryScheduled 标记是否已经为该 shell 安排了异常收口协程。
 	ShellRecoveryScheduled bool
-	// StdoutBuffer 保存当前 shell 已累计的 stdout 文本。
-	StdoutBuffer string
-	// StderrBuffer 保存当前 shell 已累计的 stderr 文本。
-	StderrBuffer string
+	// StdoutBuffer 保存当前 shell 的有界 stdout 尾部。
+	StdoutBuffer []byte
+	// StderrBuffer 保存当前 shell 的有界 stderr 尾部。
+	StderrBuffer []byte
+	// StdoutDroppedBytes 记录 stdout 缓冲前缀已回收的字节数。
+	StdoutDroppedBytes int64
+	// StderrDroppedBytes 记录 stderr 缓冲前缀已回收的字节数。
+	StderrDroppedBytes int64
 	// ArtifactPath 保存该 exec 对应的原始桥接工件路径。
 	ArtifactPath string
 }

@@ -195,9 +195,22 @@ func (service *Service) recoverShellWithoutTerminal(stream *ActiveStream, pendin
 	return service.reconcileStream(stream)
 }
 
+func materializePendingShellTail(pending runtimecore.PendingExec) runtimecore.PendingExec {
+	if pending.StdoutDroppedBytes > 0 {
+		notice := fmt.Sprintf("[truncated: %d earlier stdout bytes are no longer retained]\n", pending.StdoutDroppedBytes)
+		pending.StdoutBuffer = append([]byte(notice), pending.StdoutBuffer...)
+	}
+	if pending.StderrDroppedBytes > 0 {
+		notice := fmt.Sprintf("[truncated: %d earlier stderr bytes are no longer retained]\n", pending.StderrDroppedBytes)
+		pending.StderrBuffer = append([]byte(notice), pending.StderrBuffer...)
+	}
+	return pending
+}
+
 func buildSyntheticShellResultPayload(pending runtimecore.PendingExec, reason string) string {
+	pending = materializePendingShellTail(pending)
 	sections := make([]string, 0, 2)
-	if captured := summarizeCapturedShellOutput(pending.StdoutBuffer, pending.StderrBuffer); captured != "" {
+	if captured := summarizeCapturedShellOutput(string(pending.StdoutBuffer), string(pending.StderrBuffer)); captured != "" {
 		sections = append(sections, captured)
 	}
 	noteLines := []string{

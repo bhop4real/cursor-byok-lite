@@ -57,24 +57,25 @@ func (service *Service) WriteGitCommitMessage(ctx context.Context, req *connect.
 	}
 	modelCallID := requestID + "-model"
 	modelID, modelSource, lastAgentModelHash := service.resolveCommitMessageModelID(ctx)
-	accumulated := ""
+	var accumulated strings.Builder
 	artifactPaths := &modeladapter.LLMArtifactPaths{}
 	err = service.provider.StartStream(ctx, ProviderRequest{
-		RequestID:      requestID,
-		RunID:          requestID,
-		ModelCallID:    modelCallID,
-		ModelID:        modelID,
-		Mode:           agentv1.AgentMode_AGENT_MODE_AGENT,
-		Messages:       messages,
-		Tools:          nil,
-		MaxTokens:      commitMessageMaxOutputTokens,
-		CompileSummary: fmt.Sprintf("generate commit message diffs=%d previous_commits=%d model_source=%s last_agent_model_hash=%s", len(diffs), len(req.Msg.GetPreviousCommitMessages()), modelSource, lastAgentModelHash),
-		Observer:       recorder,
-		ArtifactPaths:  artifactPaths,
+		RequestID:           requestID,
+		RunID:               requestID,
+		ModelCallID:         modelCallID,
+		ModelID:             modelID,
+		Mode:                agentv1.AgentMode_AGENT_MODE_AGENT,
+		Messages:            messages,
+		Tools:               nil,
+		MaxTokens:           commitMessageMaxOutputTokens,
+		CompileSummary:      fmt.Sprintf("generate commit message diffs=%d previous_commits=%d model_source=%s last_agent_model_hash=%s", len(diffs), len(req.Msg.GetPreviousCommitMessages()), modelSource, lastAgentModelHash),
+		Observer:            recorder,
+		RawResponseObserver: service.rawProviderObserver(ctx),
+		ArtifactPaths:       artifactPaths,
 	}, func(event modeladapter.ModelEvent) error {
 		switch event.Kind {
 		case modeladapter.ModelEventKindTextDelta:
-			accumulated += event.Text
+			accumulated.WriteString(event.Text)
 			return nil
 		case modeladapter.ModelEventKindThinkingDelta, modeladapter.ModelEventKindThinkingCompleted, modeladapter.ModelEventKindTurnFinished:
 			return nil
@@ -95,7 +96,8 @@ func (service *Service) WriteGitCommitMessage(ctx context.Context, req *connect.
 		}
 		return nil, commitMessageConnectError(recorder, connect.CodeUnknown, err)
 	}
-	commitMessage := cleanGeneratedCommitMessage(accumulated)
+	accumulatedText := accumulated.String()
+	commitMessage := cleanGeneratedCommitMessage(accumulatedText)
 	if firstCommitMessageLine(commitMessage) == "" {
 		return nil, commitMessageConnectError(recorder, connect.CodeInternal, fmt.Errorf("generated commit message is empty"))
 	}
@@ -104,7 +106,7 @@ func (service *Service) WriteGitCommitMessage(ctx context.Context, req *connect.
 		"model_call_id":    modelCallID,
 		"model_source":     modelSource,
 		"model_id":         modelID,
-		"raw_text":         accumulated,
+		"raw_text":         accumulatedText,
 		"commit_message":   commitMessage,
 		"artifact_request": artifactPaths.RequestPath,
 		"artifact_sse":     artifactPaths.ResponsePath,

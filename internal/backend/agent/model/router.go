@@ -34,6 +34,21 @@ func NewRouter(resolver ChannelResolver) *Router {
 	}
 }
 
+// Close 释放路由器拥有的 provider 适配器资源。
+func (router *Router) Close() {
+	if router == nil {
+		return
+	}
+	if closer, ok := router.openai.(interface{ Close() }); ok {
+		closer.Close()
+	}
+	if closer, ok := router.anthropic.(interface{ Close() }); ok {
+		closer.Close()
+	}
+	router.openai = nil
+	router.anthropic = nil
+}
+
 // Stream 根据模型标识选择具体 provider 并转发请求。
 func (router *Router) Stream(ctx context.Context, req StreamRequest, sink func(ModelEvent) error) error {
 	if router == nil || router.resolver == nil {

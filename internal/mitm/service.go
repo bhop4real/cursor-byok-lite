@@ -46,7 +46,8 @@ type ProxyServer struct {
 	upstreamClient *http.Client
 
 	// proxy 表示当前声明中的 proxy。
-	proxy *goproxy.ProxyHttpServer
+	proxy          *goproxy.ProxyHttpServer
+	proxyTransport *http.Transport
 
 	// runMu 表示当前声明中的 runMu。
 	runMu sync.RWMutex
@@ -308,15 +309,52 @@ func (s *ProxyServer) Start() error {
 
 // Stop 用于处理与 Stop 相关的逻辑。
 func (s *ProxyServer) Stop(ctx context.Context) error {
-	s.runMu.Lock()
-	httpServer := s.httpServer
-	if httpServer == nil {
-		s.runMu.Unlock()
+	if s == nil {
 		return nil
 	}
-	s.httpServer = nil
+	s.runMu.Lock()
+	httpServer := s.httpServer
+	if httpServer != nil {
+		if err := httpServer.Shutdown(ctx); err != nil {
+			s.runMu.Unlock()
+			return err
+		}
+		if s.httpServer == httpServer {
+			s.httpServer = nil
+		}
+	}
+	upstreamClient := s.upstreamClient
+	proxyTransport := s.proxyTransport
 	s.runMu.Unlock()
-	return httpServer.Shutdown(ctx)
+	if upstreamClient != nil {
+		upstreamClient.CloseIdleConnections()
+	}
+	if proxyTransport != nil {
+		proxyTransport.CloseIdleConnections()
+	}
+	return nil
+}
+
+// Close stops the proxy and releases all transports owned by this server.
+func (s *ProxyServer) Close(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if err := s.Stop(ctx); err != nil {
+		return err
+	}
+	s.runMu.Lock()
+	upstreamClient := s.upstreamClient
+	proxyTransport := s.proxyTransport
+	s.upstreamClient = nil
+	s.proxyTransport = nil
+	s.proxy = nil
+	s.runMu.Unlock()
+	if upstreamClient != nil {
+		upstreamClient.CloseIdleConnections()
+	}
+	netproxy.CloseTransport(proxyTransport)
+	return nil
 }
 
 // IsRunning 用于处理与 IsRunning 相关的逻辑。
@@ -364,7 +402,7 @@ func (s *ProxyServer) newGoproxyHandler() *goproxy.ProxyHttpServer {
 	proxy.AllowHTTP2 = true
 	proxy.Logger = &goproxyLogAdapter{}
 	proxy.CertStore = newMITMCertStore()
-	proxy.Tr = netproxy.NewTransport(&http.Transport{
+	transport := netproxy.NewTransport(&http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          200,
@@ -373,6 +411,8 @@ func (s *ProxyServer) newGoproxyHandler() *goproxy.ProxyHttpServer {
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 	})
+	proxy.Tr = transport
+	s.proxyTransport = transport
 	proxy.ConnectionErrHandler = func(conn io.Writer, ctx *goproxy.ProxyCtx, err error) {
 		host := requestHost(ctx)
 		remoteAddr := requestRemoteAddr(ctx)

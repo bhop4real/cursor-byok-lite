@@ -53,6 +53,7 @@ type HomeMetricsConfig struct {
 
 type Config struct {
 	Log                       bool                 `json:"log" yaml:"log"`
+	DisableUpdates            bool                 `json:"disableUpdates" yaml:"disableUpdates"`
 	ProviderStreamIdleTimeout int                  `json:"providerStreamIdleTimeout" yaml:"providerStreamIdleTimeout"`
 	BackendListenAddr         string               `json:"backendListenAddr" yaml:"backendListenAddr"`
 	ProxyListenAddr           string               `json:"proxyListenAddr" yaml:"proxyListenAddr"`
@@ -78,6 +79,7 @@ func DefaultConfig() Config {
 func NormalizeConfig(input Config) (Config, error) {
 	output := DefaultConfig()
 	output.Log = input.Log
+	output.DisableUpdates = input.DisableUpdates
 	output.ProviderStreamIdleTimeout = normalizeProviderStreamIdleTimeout(input.ProviderStreamIdleTimeout)
 	backendListenAddr, err := normalizeListenAddr(input.BackendListenAddr, DefaultBackendListenAddr, "backendListenAddr")
 	if err != nil {

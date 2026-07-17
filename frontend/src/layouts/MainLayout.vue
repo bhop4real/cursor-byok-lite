@@ -4,52 +4,32 @@ import LocaleSelect from "@/components/LocaleSelect.vue";
 import { useMessage } from "@/composables/useMessage";
 import { showModal } from "@/composables/useModal";
 import {
-  getFooterAuthorInfo,
-  openFooterAuthorHome,
-} from "@/services/clientApi";
-import {
   appState,
   checkForAppUpdates,
   syncServiceState,
   updateViewState,
 } from "@/state/appState";
 import { isWindows } from "@/utils/isWindows";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { useRoute } from "vue-router";
-import { useLocale } from "@/i18n/runtime";
 import Logo from "@/assets/logo.png";
 
+const GITHUB_REPOSITORIES = [
+  {
+    label: "GitHub 原版",
+    url: "https://github.com/leookun/cursor-byok",
+  },
+  {
+    label: "GitHub 修改版",
+    url: "https://github.com/bhop4real/cursor-byok-lite",
+  },
+];
 const route = useRoute();
 const message = useMessage();
 const showIcon = computed(() => route.meta.showIcon !== false);
-const title = computed(() => route.meta.title ?? "Cursor助手｜永久免费｜自定义API");
+const title = computed(() => route.meta.title || "");
 const directlyClose = computed(() => route.meta.directlyClose === true);
 const showFooter = computed(() => route.path === "/");
-const footerAuthorInfo = ref(null);
-const { locale } = useLocale();
-
-const localizedAuthorInfo = computed(() => {
-  if (!footerAuthorInfo.value) return null;
-  if (locale.value === "zh-CN") {
-    return footerAuthorInfo.value;
-  }
-  if (locale.value === "ja-JP") {
-    return {
-      buttonText: "著者 leookun",
-      dialogTitle: "著者からのメッセージ",
-      dialogContent: "このソフトウェアは完全に無料です。もし料金を請求された場合は、詐欺の可能性が高いです。\n著者のホームページ https://space.bilibili.com/311706663/upload/video にアクセスして、更新情報や利用方法などを確認してください。",
-      dialogConfirmText: "ホームページへ",
-      dialogCancelText: "閉じる"
-    };
-  }
-  return {
-    buttonText: "Author leookun",
-    dialogTitle: "Author's Message",
-    dialogContent: "This software is completely free. If you were charged, you were likely scammed.\nWelcome to visit the author's homepage at https://space.bilibili.com/311706663/upload/video\nto see more updates, sharing guides, and future content.",
-    dialogConfirmText: "Visit Homepage",
-    dialogCancelText: "Close"
-  };
-});
 const usageDocsURL = "https://docs.leokun.cn";
 let proxyStateTimer = null;
 const proxyStatePollIntervalMs = 10000;
@@ -106,18 +86,12 @@ async function handleCheckForUpdates() {
   const loadingMessageID = message.loading("检查更新中...");
   try {
     await checkForAppUpdates();
+  } catch (error) {
+    await showActionError("检查更新失败", error);
   } finally {
     if (loadingMessageID) {
       message.remove(loadingMessageID);
     }
-  }
-}
-
-async function loadFooterAuthorInfo() {
-  try {
-    footerAuthorInfo.value = await getFooterAuthorInfo();
-  } catch (error) {
-    console.error("[MainLayout] 加载作者信息失败", error);
   }
 }
 
@@ -130,27 +104,6 @@ async function showActionError(title, error) {
   });
 }
 
-async function handleOpenAuthorHome() {
-  if (!localizedAuthorInfo.value) {
-    return;
-  }
-  const confirmed = await showModal({
-    title: localizedAuthorInfo.value.dialogTitle,
-    content: localizedAuthorInfo.value.dialogContent,
-    confirmText: localizedAuthorInfo.value.dialogConfirmText,
-    cancelText: localizedAuthorInfo.value.dialogCancelText,
-    showCancel: true,
-  });
-  if (!confirmed) {
-    return;
-  }
-  try {
-    await openFooterAuthorHome();
-  } catch (error) {
-    await showActionError("打开主页失败", error);
-  }
-}
-
 async function handleOpenUsageDocs() {
   try {
     await Browser.OpenURL(usageDocsURL);
@@ -159,8 +112,15 @@ async function handleOpenUsageDocs() {
   }
 }
 
+async function handleOpenGitHub(url) {
+  try {
+    await Browser.OpenURL(url);
+  } catch (error) {
+    await showActionError("打开 GitHub 失败", error);
+  }
+}
+
 onMounted(() => {
-  void loadFooterAuthorInfo();
   proxyStateTimer = window.setInterval(() => {
     if (showFooter.value) {
       void syncServiceState().catch(() => {});
@@ -189,8 +149,7 @@ onUnmounted(() => {
       :class="{ '!justify-center': !isWindows }"
     >
       <div class="center-row gap-2" style="font-family: var(--font-num);">
-        <img v-if="showIcon" :src="Logo" class="w-[18px] h-[18px]" />
-        <div>{{ title }}</div>
+          <div v-if="title">{{ title }}</div>
       </div>
       <div
         v-if="isWindows"
@@ -246,13 +205,13 @@ onUnmounted(() => {
         <span>使用教程</span>
       </button>
       <button
-        v-if="localizedAuthorInfo"
+        v-for="repository in GITHUB_REPOSITORIES"
+        :key="repository.url"
         type="button"
-        class="center-row shrink-0 gap-[6px] cursor-pointer rounded-[6px] px-[6px] py-[3px] transition-colors duration-150 hover:bg-[#1f1f1f] hover:text-[#e5e5e5]"
-        @click="handleOpenAuthorHome"
+        class="shrink-0 cursor-pointer rounded-[6px] px-[6px] py-[3px] transition-colors duration-150 hover:bg-[#1f1f1f] hover:text-[#e5e5e5]"
+        @click="handleOpenGitHub(repository.url)"
       >
-        <span class="icon-[ant-design--bilibili-outlined] text-[14px]"></span>
-        <span>{{ localizedAuthorInfo.buttonText }}</span>
+        {{ repository.label }}
       </button>
       <div
         v-if="updateViewState.footerDownloading"

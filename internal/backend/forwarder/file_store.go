@@ -2,7 +2,6 @@
 package forwarder
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,44 +69,60 @@ func (store *ConversationFileStore) CreateConversation(conversationID string, mo
 	if store == nil {
 		return nil, fmt.Errorf("conversation file store is nil")
 	}
-	return store.mutateConversation(conversationID, true, func(conversation *ConversationFile) error {
-		if strings.TrimSpace(conversation.ConversationID) != "" {
-			if strings.TrimSpace(conversation.Mode) == "" {
-				alias, err := modeAlias(mode)
-				if err != nil {
-					return err
-				}
-				conversation.Mode = alias
+	normalizedConversationID, err := validateConversationID(conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(store.conversationDir(normalizedConversationID), 0o755); err != nil {
+		return nil, fmt.Errorf("create conversation directory: %w", err)
+	}
+	release, err := acquireConversationLock(store.lockPath(normalizedConversationID))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	conversation, err := store.readConversationMetaLocked(normalizedConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation != nil {
+		if strings.TrimSpace(conversation.Mode) == "" {
+			alias, err := modeAlias(mode)
+			if err != nil {
+				return nil, err
 			}
-			return nil
+			conversation.Mode = alias
+			if err := store.writeConversationMetaSnapshotLocked(normalizedConversationID, conversation); err != nil {
+				return nil, err
+			}
 		}
-		now := time.Now().UTC()
-		normalizedConversationID := strings.TrimSpace(conversationID)
-		if normalizedConversationID == "" {
-			return fmt.Errorf("conversation_id is required")
-		}
-		conversation.SchemaVersion = conversationSchemaVersion
-		conversation.ConversationID = normalizedConversationID
-		conversation.RootConversationID = strings.TrimSpace(rootConversationID)
-		if conversation.RootConversationID == "" {
-			conversation.RootConversationID = normalizedConversationID
-		}
-		conversation.ParentConversationID = strings.TrimSpace(parentConversationID)
-		conversation.ParentToolCallID = strings.TrimSpace(parentToolCallID)
-		alias, err := modeAlias(mode)
-		if err != nil {
-			return err
-		}
-		conversation.Mode = alias
-		conversation.CreatedAt = now
-		conversation.UpdatedAt = now
-		conversation.NextTurnSeq = 1
-		conversation.NextEntrySeq = 1
-		conversation.ContextVersion = 0
-		conversation.CurrentLoopStatus = "idle"
-		conversation.Entries = make([]HistoryEntry, 0, 16)
-		return nil
-	})
+		return cloneConversationFile(conversation), nil
+	}
+
+	now := time.Now().UTC()
+	alias, err := modeAlias(mode)
+	if err != nil {
+		return nil, err
+	}
+	conversation = &ConversationFile{
+		SchemaVersion:        conversationSchemaVersion,
+		ConversationID:       normalizedConversationID,
+		RootConversationID:   firstNonEmpty(strings.TrimSpace(rootConversationID), normalizedConversationID),
+		ParentConversationID: strings.TrimSpace(parentConversationID),
+		ParentToolCallID:     strings.TrimSpace(parentToolCallID),
+		Mode:                 alias,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+		NextTurnSeq:          1,
+		NextEntrySeq:         1,
+		CurrentLoopStatus:    "idle",
+		Entries:              make([]HistoryEntry, 0, 16),
+	}
+	if err := store.writeConversationLocked(normalizedConversationID, conversation); err != nil {
+		return nil, err
+	}
+	return cloneConversationFile(conversation), nil
 }
 
 // LoadConversation 读取 state.json + context.json。
@@ -166,6 +181,57 @@ func (store *ConversationFileStore) AppendEntries(conversationID string, entries
 		return nil, nil, err
 	}
 	return cloneConversationFile(conversation), assigned, nil
+}
+
+func (store *ConversationFileStore) AppendEntriesFromSnapshot(conversationID string, snapshot *ConversationFile, entries []HistoryEntry) (*ConversationFile, []HistoryEntry, error) {
+	if store == nil {
+		return nil, nil, fmt.Errorf("conversation file store is nil")
+	}
+	if snapshot == nil {
+		return store.AppendEntries(conversationID, entries)
+	}
+	if len(entries) == 0 {
+		return cloneConversationFile(snapshot), nil, nil
+	}
+	normalizedConversationID, err := validateConversationID(conversationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := os.MkdirAll(store.conversationDir(normalizedConversationID), 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create conversation directory: %w", err)
+	}
+	release, err := acquireConversationLock(store.lockPath(normalizedConversationID))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
+
+	metadata, err := store.readConversationMetaLocked(normalizedConversationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var conversation *ConversationFile
+	if metadata != nil &&
+		metadata.ContextVersion == snapshot.ContextVersion &&
+		metadata.NextEntrySeq == snapshot.NextEntrySeq &&
+		metadata.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		conversation = metadata
+		conversation.Entries = snapshot.Entries
+	} else {
+		conversation, err = store.readConversationLocked(normalizedConversationID)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if conversation == nil {
+		conversation = cloneConversationFile(snapshot)
+	}
+	assigned := appendEntriesInPlace(conversation, entries)
+	deriveConversationLoopState(conversation)
+	if err := store.writeConversationLocked(normalizedConversationID, conversation); err != nil {
+		return nil, nil, err
+	}
+	return conversation, assigned, nil
 }
 
 func (store *ConversationFileStore) SaveConversationWithEntries(conversationID string, source *ConversationFile, entries []HistoryEntry) (*ConversationFile, error) {
@@ -227,7 +293,7 @@ func (store *ConversationFileStore) UpdateConversationMeta(conversationID string
 	}
 	defer release()
 
-	conversation, err := store.readConversationLocked(normalizedConversationID)
+	conversation, err := store.readConversationMetaLocked(normalizedConversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +304,6 @@ func (store *ConversationFileStore) UpdateConversationMeta(conversationID string
 			RootConversationID: normalizedConversationID,
 			NextTurnSeq:        1,
 			NextEntrySeq:       1,
-			Entries:            make([]HistoryEntry, 0, 16),
 			CreatedAt:          time.Now().UTC(),
 		}
 	}
@@ -247,7 +312,7 @@ func (store *ConversationFileStore) UpdateConversationMeta(conversationID string
 			return nil, err
 		}
 	}
-	if err := store.writeConversationMetaLocked(normalizedConversationID, conversation); err != nil {
+	if err := store.writeConversationMetaSnapshotLocked(normalizedConversationID, conversation); err != nil {
 		return nil, err
 	}
 	return cloneConversationFile(conversation), nil
@@ -394,6 +459,23 @@ func (store *ConversationFileStore) mutateConversation(conversationID string, cr
 	return cloneConversationFile(conversation), nil
 }
 
+func (store *ConversationFileStore) readConversationMetaLocked(conversationID string) (*ConversationFile, error) {
+	stateBody, err := os.ReadFile(store.statePath(conversationID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read conversation state: %w", err)
+	}
+	var conversation ConversationFile
+	if err := json.Unmarshal(stateBody, &conversation); err != nil {
+		return nil, fmt.Errorf("decode conversation state %q: %w", conversationID, err)
+	}
+	normalizeConversationMetadata(conversationID, &conversation)
+	conversation.Entries = nil
+	return &conversation, nil
+}
+
 func (store *ConversationFileStore) readConversationLocked(conversationID string) (*ConversationFile, error) {
 	stateBody, err := os.ReadFile(store.statePath(conversationID))
 	if err != nil {
@@ -462,6 +544,17 @@ func (store *ConversationFileStore) writeConversationMetaLocked(conversationID s
 	metadata := cloneConversationFile(conversation)
 	metadata.SchemaVersion = conversationSchemaVersion
 	metadata.ContextVersion = contextVersionForEntries(conversation.Entries)
+	metadata.Entries = nil
+	return writeJSONFileAtomic(store.statePath(conversationID), metadata)
+}
+
+func (store *ConversationFileStore) writeConversationMetaSnapshotLocked(conversationID string, conversation *ConversationFile) error {
+	if conversation == nil {
+		return fmt.Errorf("conversation is nil")
+	}
+	normalizeConversationMetadata(conversationID, conversation)
+	metadata := cloneConversationFile(conversation)
+	metadata.SchemaVersion = conversationSchemaVersion
 	metadata.Entries = nil
 	return writeJSONFileAtomic(store.statePath(conversationID), metadata)
 }
@@ -698,6 +791,31 @@ func mergeConversationMetadata(target *ConversationFile, source *ConversationFil
 	target.CurrentTurnSeq = source.CurrentTurnSeq
 }
 
+func normalizeConversationMetadata(conversationID string, conversation *ConversationFile) {
+	if conversation == nil {
+		return
+	}
+	conversation.SchemaVersion = conversationSchemaVersion
+	if strings.TrimSpace(conversation.ConversationID) == "" {
+		conversation.ConversationID = conversationID
+	}
+	if strings.TrimSpace(conversation.RootConversationID) == "" {
+		conversation.RootConversationID = conversation.ConversationID
+	}
+	if conversation.NextTurnSeq <= 0 {
+		conversation.NextTurnSeq = 1
+	}
+	if conversation.NextEntrySeq <= 0 {
+		conversation.NextEntrySeq = 1
+	}
+	if conversation.CreatedAt.IsZero() {
+		conversation.CreatedAt = time.Now().UTC()
+	}
+	if conversation.UpdatedAt.IsZero() {
+		conversation.UpdatedAt = conversation.CreatedAt
+	}
+}
+
 func normalizeLoadedConversation(conversationID string, conversation *ConversationFile) {
 	if conversation == nil {
 		return
@@ -756,13 +874,9 @@ func writeJSONFileAtomic(path string, payload any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
 	}
-	data, err := json.Marshal(payload)
+	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal json: %w", err)
-	}
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, data, "", "  "); err == nil {
-		data = pretty.Bytes()
 	}
 	file, tempPath, err := openUniqueArtifactTempFile(path)
 	if err != nil {

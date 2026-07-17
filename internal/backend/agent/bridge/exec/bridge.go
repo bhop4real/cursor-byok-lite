@@ -266,7 +266,7 @@ func (bridge *Bridge) ApplyExecClientMessage(msg *agentv1.ExecClientMessage, pen
 					Exit: event.Exit,
 				},
 			}
-			stdout, stderr := truncateShellStreamsForReplay(pending.StdoutBuffer, pending.StderrBuffer)
+			stdout, stderr := truncateShellStreamsForReplay(string(pending.StdoutBuffer), string(pending.StderrBuffer))
 			result.ToolResultPayload = summarizeShellTerminalPayload(stdout, stderr, event.Exit, false)
 			result.ToolCall = buildShellCompletedToolCall(pending.ToolCallID, pending.ArgsJSON, stdout, stderr, event.Exit)
 			result.IsTerminal = true

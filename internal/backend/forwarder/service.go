@@ -9,6 +9,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -260,6 +261,8 @@ type Service struct {
 	execBridge         execbridge.ExecBridge
 	interactionBridge  interactionbridge.InteractionBridge
 	appendSeq          *appendSequenceTracker
+	providerWorkers    sync.WaitGroup
+	closeOnce          sync.Once
 }
 
 type agentModelMemory interface {
@@ -302,6 +305,31 @@ func NewService(historyRoot string, resolver modeladapter.ChannelResolver) *Serv
 	}
 	service.startHistoryMaintenance()
 	return service
+}
+
+// Close stops active stream owners before releasing provider and interaction transports.
+func (service *Service) Close() {
+	if service == nil {
+		return
+	}
+	service.closeOnce.Do(func() {
+		if service.broker != nil {
+			for _, waiters := range service.broker.Shutdown() {
+				if waiters.ActorDone != nil {
+					<-waiters.ActorDone
+				}
+			}
+		}
+		service.providerWorkers.Wait()
+		if closer, ok := service.provider.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		service.provider = nil
+		if closer, ok := service.interactionBridge.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		service.interactionBridge = nil
+	})
 }
 
 // newServiceWithDependencies 主要用于测试场景，允许注入替身依赖。
@@ -421,7 +449,7 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 	if requestID == "" {
 		return buildRunSSECustomError(connect.CodeInvalidArgument, "请求参数无效", fmt.Errorf("request_id is required"))
 	}
-	subscriberID, signal, err := service.broker.Subscribe(requestID)
+	subscriberID, signal, cursor, err := service.broker.Subscribe(requestID)
 	if err != nil {
 		return buildRunSSECustomError(connect.CodeInvalidArgument, "请求参数无效", err)
 	}
@@ -445,7 +473,6 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	cursor := 0
 	for {
 		backlog, err := service.broker.ReadFromCursor(requestID, cursor)
 		if err != nil {
@@ -462,7 +489,7 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 						service.debug.LogRunSSE(ctx, requestID, "", "send_error", map[string]any{
 							"cursor":       cursor,
 							"message_case": agentServerMessageCase(event.Message),
-							"message":      protoJSONDebugPayload(event.Message),
+							"message":      service.debug.protoJSONPayload(ctx, event.Message),
 							"error":        err.Error(),
 						})
 						return err
@@ -470,10 +497,15 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 					service.debug.LogRunSSE(ctx, requestID, "", "send_message", map[string]any{
 						"cursor":       cursor,
 						"message_case": agentServerMessageCase(event.Message),
-						"message":      protoJSONDebugPayload(event.Message),
+						"message":      service.debug.protoJSONPayload(ctx, event.Message),
 					})
 				}
-				cursor++
+				if event.Sequence >= cursor {
+					cursor = event.Sequence + 1
+				} else {
+					cursor++
+				}
+				service.broker.AdvanceSubscriber(requestID, subscriberID, cursor)
 				if event.End {
 					service.debug.LogRunSSE(ctx, requestID, "", "terminal", map[string]any{
 						"cursor":                 cursor,
@@ -493,7 +525,12 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 			})
 			if backlog, err := service.broker.ReadFromCursor(requestID, cursor); err == nil {
 				for _, event := range backlog {
-					cursor++
+					if event.Sequence >= cursor {
+						cursor = event.Sequence + 1
+					} else {
+						cursor++
+					}
+					service.broker.AdvanceSubscriber(requestID, subscriberID, cursor)
 					if event.End {
 						service.debug.LogRunSSE(context.Background(), requestID, "", "terminal_after_context_done", map[string]any{
 							"cursor":                 cursor,
@@ -523,7 +560,7 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 			service.debug.LogRunSSE(ctx, requestID, "", "heartbeat_error", map[string]any{
 				"cursor":       cursor,
 				"message_case": agentServerMessageCase(heartbeat),
-				"message":      protoJSONDebugPayload(heartbeat),
+				"message":      service.debug.protoJSONPayload(ctx, heartbeat),
 				"error":        err.Error(),
 			})
 			return err
@@ -531,7 +568,7 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 		service.debug.LogRunSSE(ctx, requestID, "", "heartbeat", map[string]any{
 			"cursor":       cursor,
 			"message_case": agentServerMessageCase(heartbeat),
-			"message":      protoJSONDebugPayload(heartbeat),
+			"message":      service.debug.protoJSONPayload(ctx, heartbeat),
 		})
 	}
 }
@@ -734,6 +771,9 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 		appendEntriesInPlace(conversation, initialEntries)
 		deriveConversationLoopState(conversation)
 	}
+	if rewindDecision.Apply && service.projector != nil {
+		service.projector.InvalidateConversation(intent.ConversationID)
+	}
 
 	stream, err := service.broker.OpenStream(intent.RequestID, intent.ConversationID, turnSeq, intent.ModelID, intent.ModelName, effectiveMode, userMessageText(intent.UserMessage))
 	if err != nil {
@@ -748,6 +788,7 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 	updateStreamRequestContextData(stream, intent.RequestContext)
 	service.updateStreamMCPToolServers(stream, intent.RequestContext)
 	clearPendingProviderCompletion(stream)
+	clearAllStreamTimers(stream)
 	stream.mu.Lock()
 	stream.ThinkingEffort = strings.TrimSpace(intent.ThinkingEffort)
 	stream.SubagentModelOverrides = cloneSubagentModelOverrides(intent.SubagentModelOverrides)
@@ -759,11 +800,12 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 	stream.BackgroundShells = make(map[string]*BackgroundShellState)
 	stream.BackgroundShellsByMessageID = make(map[uint32]string)
 	stream.BackgroundShellsByExecID = make(map[string]string)
-	stream.TimerTokens = make(map[string]uint64)
+	stream.Timers = make(map[string]streamTimerRegistration)
+	stream.NextTimerToken = 0
 	stream.CurrentProviderToken = 0
 	stream.CurrentCompactionToken = 0
-	stream.ProviderAccumulatedText = ""
-	stream.ProviderAccumulatedReasoning = ""
+	stream.ProviderAccumulatedText = nil
+	stream.ProviderAccumulatedReasoning = nil
 	stream.ProviderAccumulatedReasoningSignature = ""
 	stream.ProviderAccumulatedReasoningSignatureSource = ""
 	stream.ProviderAccumulatedReasoningItemID = ""
@@ -892,6 +934,7 @@ func (service *Service) handleExecResult(intent InboundIntent) error {
 	if isHiddenWriteExecKind(pending.ExecKind) {
 		return service.handleHiddenWriteExecResult(stream, pending, intent.ExecClientMessage)
 	}
+	pending = materializePendingShellTail(pending)
 	result, err := service.execBridge.ApplyExecClientMessage(intent.ExecClientMessage, pending)
 	if err != nil {
 		return err
@@ -991,15 +1034,6 @@ func (service *Service) handleExecControl(intent InboundIntent) error {
 	}
 	if strings.TrimSpace(result.ToolResultPayload) != "" {
 		if err := service.appendToolResult(stream, pending.ToolCallID, deriveToolNameFromPendingExec(pending), pending.ArgsJSON, result.ToolResultPayload, pending.ReasoningContent, nil); err != nil {
-			return err
-		}
-		_, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
-			newMetadataEntry(stream.TurnSeq, stream.RequestID, "tool_control", map[string]any{
-				"tool_call_id": result.ToolCallID,
-				"payload":      result.ToolResultPayload,
-			}),
-		})
-		if err != nil {
 			return err
 		}
 	}
@@ -1280,8 +1314,8 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 	stream.CurrentModelCallID = uuid.NewString()
 	stream.CurrentProviderToken++
 	currentToken := stream.CurrentProviderToken
-	stream.ProviderAccumulatedText = ""
-	stream.ProviderAccumulatedReasoning = ""
+	stream.ProviderAccumulatedText = nil
+	stream.ProviderAccumulatedReasoning = nil
 	stream.ProviderAccumulatedReasoningSignature = ""
 	stream.ProviderAccumulatedReasoningSignatureSource = ""
 	stream.ProviderAccumulatedReasoningItemID = ""
@@ -1369,21 +1403,22 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 	service.setTurnPhase(stream, TurnPhaseProviderRunning)
 
 	providerRequest := ProviderRequest{
-		RequestID:          requestID,
-		ConversationID:     conversationID,
-		RunID:              requestID,
-		ModelCallID:        modelCallID,
-		ModelID:            modelID,
-		Mode:               compiled.Mode,
-		ThinkingEffort:     compiled.Mode.String(),
-		Messages:           compiled.Messages,
-		StableMessageCount: compiled.StableMessageCount,
-		Tools:              compiled.Tools,
-		MaxTokens:          maxTokens,
-		RequestKnobs:       requestKnobs,
-		CompileSummary:     compiled.CompileSummary,
-		Observer:           service.recorder,
-		ArtifactPaths:      &modeladapter.LLMArtifactPaths{},
+		RequestID:           requestID,
+		ConversationID:      conversationID,
+		RunID:               requestID,
+		ModelCallID:         modelCallID,
+		ModelID:             modelID,
+		Mode:                compiled.Mode,
+		ThinkingEffort:      compiled.Mode.String(),
+		Messages:            compiled.Messages,
+		StableMessageCount:  compiled.StableMessageCount,
+		Tools:               compiled.Tools,
+		MaxTokens:           maxTokens,
+		RequestKnobs:        requestKnobs,
+		CompileSummary:      compiled.CompileSummary,
+		Observer:            service.recorder,
+		RawResponseObserver: service.rawProviderObserver(context.Background()),
+		ArtifactPaths:       &modeladapter.LLMArtifactPaths{},
 	}
 	providerRequest.ThinkingEffort = thinkingEffort
 	service.debug.LogProvider(context.Background(), requestID, conversationID, "provider_request_prepared", map[string]any{
@@ -1399,7 +1434,11 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 		"tool_count":             len(compiled.Tools),
 		"compile_summary_length": len(compiled.CompileSummary),
 	})
-	go service.runProviderStream(stream, currentToken, ctx, providerRequest)
+	service.providerWorkers.Add(1)
+	go func() {
+		defer service.providerWorkers.Done()
+		service.runProviderStream(stream, currentToken, ctx, providerRequest)
+	}()
 	return nil
 }
 
@@ -1747,6 +1786,7 @@ func (service *Service) handleToolInvocation(stream *ActiveStream, invocation ru
 		stream.mu.Unlock()
 		service.scheduleShellForegroundRecovery(stream.RequestID, pendingExec)
 		removePendingExec := func() {
+			clearExecRecoveryTimers(stream, pendingExec.ExecID)
 			stream.mu.Lock()
 			delete(stream.PendingExecs, pendingExec.ExecID)
 			stream.mu.Unlock()
@@ -1875,17 +1915,27 @@ func (service *Service) appendToolResult(stream *ActiveStream, toolCallID string
 		return nil
 	}
 	var payload json.RawMessage
-	if toolCall != nil {
+	if toolCall != nil && shouldPersistStructuredToolResult(toolName) {
 		encoded, err := protojson.Marshal(toolCall)
 		if err != nil {
 			return err
 		}
 		payload = encoded
 	}
+	persistedResultText := limitProjectedToolResultReplay(toolName, resultText, "", false, false)
 	_, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
-		newToolResultEntry(stream.TurnSeq, stream.RequestID, toolCallID, toolName, string(argsJSON), resultText, reasoningContent, payload),
+		newToolResultEntry(stream.TurnSeq, stream.RequestID, toolCallID, toolName, string(argsJSON), persistedResultText, reasoningContent, payload),
 	})
 	return err
+}
+
+func shouldPersistStructuredToolResult(toolName string) bool {
+	switch strings.TrimSpace(toolName) {
+	case "CreatePlan", "TodoWrite":
+		return true
+	default:
+		return false
+	}
 }
 
 func (service *Service) publishToolCallCompleted(requestID string, toolCallID string, modelCallID string, toolCall *agentv1.ToolCall) error {
@@ -1921,7 +1971,7 @@ func (service *Service) applyExecProgress(stream *ActiveStream, pending runtimec
 		current.ChunkCount++
 		current.StreamState = "streaming"
 		current.LastShellActivityAt = now
-		current.StdoutBuffer += execbridge.DecodeShellStdout(event.Stdout)
+		current.StdoutBuffer, current.StdoutDroppedBytes = appendBoundedShellTail(current.StdoutBuffer, current.StdoutDroppedBytes, []byte(execbridge.DecodeShellStdout(event.Stdout)))
 	case *agentv1.ShellStream_Stderr:
 		if current.FirstChunkAt.IsZero() {
 			current.FirstChunkAt = now
@@ -1929,7 +1979,7 @@ func (service *Service) applyExecProgress(stream *ActiveStream, pending runtimec
 		current.ChunkCount++
 		current.StreamState = "streaming"
 		current.LastShellActivityAt = now
-		current.StderrBuffer += event.Stderr.GetData()
+		current.StderrBuffer, current.StderrDroppedBytes = appendBoundedShellTail(current.StderrBuffer, current.StderrDroppedBytes, []byte(event.Stderr.GetData()))
 	case *agentv1.ShellStream_Start:
 		if current.FirstChunkAt.IsZero() {
 			current.FirstChunkAt = now
@@ -2150,18 +2200,23 @@ func (service *Service) publishCheckpoint(requestID string, _ string) error {
 	if err != nil {
 		return err
 	}
-	state, err := service.projector.ProjectLegacyCheckpoint(conversation)
+	replayMessages, err := service.projector.ProjectPromptReplay(conversation)
+	if err != nil {
+		return err
+	}
+	state, err := service.projector.ProjectLegacyCheckpointWithReplay(conversation, replayMessages)
 	if err != nil {
 		return err
 	}
 	state.PendingToolCalls = buildPendingToolCalls(pendingExecs, pendingInteractions)
-	service.rewriteCheckpointTokenDetailsForClient(stream, conversation, state)
+	compiled, hasCompiled := service.checkpointCompiledConversation(stream, conversation, replayMessages)
+	service.rewriteCheckpointTokenDetailsForClient(stream, conversation, state, compiled, hasCompiled)
 	return service.broker.Publish(requestID, StreamEvent{
 		Message: buildCheckpointMessage(state),
 	})
 }
 
-func (service *Service) rewriteCheckpointTokenDetailsForClient(stream *ActiveStream, conversation *ConversationFile, state *agentv1.ConversationStateStructure) {
+func (service *Service) rewriteCheckpointTokenDetailsForClient(stream *ActiveStream, conversation *ConversationFile, state *agentv1.ConversationStateStructure, compiled CompiledConversation, hasCompiled bool) {
 	if state == nil {
 		return
 	}
@@ -2169,17 +2224,22 @@ func (service *Service) rewriteCheckpointTokenDetailsForClient(stream *ActiveStr
 		state.TokenDetails = &agentv1.ConversationTokenDetails{}
 	}
 	state.TokenDetails.MaxTokens = clampInt64ToUint32(service.checkpointDisplayMaxTokens(stream, conversation))
-	compiled, hasCompiled := service.checkpointCompiledConversation(stream, conversation)
 	state.TokenDetails.UsedTokens = clampInt64ToUint32(service.checkpointDisplayUsedTokens(conversation, state, compiled, hasCompiled))
 	state.TokenDetails.Breakdown = estimateCheckpointPromptTokenBreakdown(compiled, hasCompiled, state.TokenDetails.UsedTokens, state.TokenDetails.MaxTokens)
 }
 
-func (service *Service) checkpointCompiledConversation(stream *ActiveStream, conversation *ConversationFile) (CompiledConversation, bool) {
+func (service *Service) checkpointCompiledConversation(stream *ActiveStream, conversation *ConversationFile, replayMessages []modeladapter.Message) (CompiledConversation, bool) {
 	if service == nil || service.compiler == nil || conversation == nil {
 		return CompiledConversation{}, false
 	}
 	_, modelName, latestUserText, mode := checkpointPromptContext(stream)
-	compiled, err := service.compiler.Compile(conversation, mode, latestUserText, modelName)
+	var compiled CompiledConversation
+	var err error
+	if compiler, ok := service.compiler.(replayPromptCompiler); ok {
+		compiled, err = compiler.CompileWithReplay(conversation, mode, latestUserText, modelName, replayMessages)
+	} else {
+		compiled, err = service.compiler.Compile(conversation, mode, latestUserText, modelName)
+	}
 	if err != nil {
 		log.Printf("forwarder checkpoint token estimate failed request_id=%s conversation_id=%s err=%v", strings.TrimSpace(activeStreamRequestID(stream)), strings.TrimSpace(conversation.ConversationID), err)
 		return CompiledConversation{}, false
@@ -3148,11 +3208,22 @@ func pendingAssistantToolShape(pending runtimecore.PendingExec) (string, []byte,
 	}
 }
 
+func clearExecRecoveryTimers(stream *ActiveStream, execID string) {
+	normalizedExecID := strings.TrimSpace(execID)
+	if stream == nil || normalizedExecID == "" {
+		return
+	}
+	clearStreamTimer(stream, providerTimerKey(streamTimerNonStreamingRecovery, normalizedExecID))
+	clearStreamTimer(stream, providerTimerKey(streamTimerShellForeground, normalizedExecID))
+	clearStreamTimer(stream, providerTimerKey(streamTimerShellTransportClose, normalizedExecID))
+}
+
 // markExecCompleted 保留一个短时 tombstone，避免迟到的 transport-level control 被误判为协议错误。
 func markExecCompleted(stream *ActiveStream, pending runtimecore.PendingExec) {
 	if stream == nil {
 		return
 	}
+	clearExecRecoveryTimers(stream, pending.ExecID)
 	now := time.Now().UTC()
 	cutoff := now.Add(-completedExecRetention)
 

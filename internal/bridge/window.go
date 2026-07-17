@@ -56,14 +56,14 @@ func (s *WindowService) GetAppVersion() string {
 }
 
 // CheckForUpdates 触发一次手动检查更新。
-func (s *WindowService) CheckForUpdates() {
+func (s *WindowService) CheckForUpdates() error {
 	s.mu.RLock()
 	manager := s.updater
 	s.mu.RUnlock()
 	if manager == nil {
-		return
+		return fmt.Errorf("更新管理器未初始化")
 	}
-	manager.CheckNow(true)
+	return manager.CheckNow(true)
 }
 
 // InstallReadyUpdate 安装当前已下载完成的更新。

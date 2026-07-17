@@ -290,6 +290,13 @@ func requestedModelPayload(model *agentv1.RequestedModel) map[string]any {
 	}
 }
 
+func (recorder *debugRecorder) protoJSONPayload(ctx context.Context, message proto.Message) any {
+	if !recorder.enabled(ctx) {
+		return nil
+	}
+	return protoJSONDebugPayload(message)
+}
+
 func protoJSONDebugPayload(message proto.Message) any {
 	if message == nil {
 		return nil

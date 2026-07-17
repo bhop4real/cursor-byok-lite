@@ -3,6 +3,7 @@ import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import LocaleSelect from "@/components/LocaleSelect.vue";
 import Select from "@/components/ui/Select.vue";
+import Switch from "@/components/ui/Switch.vue";
 import { showModal } from "@/composables/useModal";
 import {
   appState,
@@ -80,6 +81,17 @@ onMounted(async () => {
           />
         </div>
       </div>
+    </Card>
+
+    <Card>
+      <Switch
+        :enabled="appState.disableUpdates"
+        label="禁用自动更新"
+        description="保存后下次启动生效；启用后不会自动检查或下载更新。"
+        enabled-text="已禁用更新"
+        disabled-text="更新已启用"
+        @change="appState.disableUpdates = $event"
+      />
     </Card>
 
     <Card>

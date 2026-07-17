@@ -27,7 +27,13 @@ func updateStreamRequestContextData(stream *ActiveStream, requestContext *agentv
 		env := requestContext.GetEnv()
 		workspacePaths = compactWorkspacePaths(env.GetWorkspacePaths(), env.GetProjectFolder())
 		terminalsFolder = strings.TrimSpace(env.GetTerminalsFolder())
-		fileContents = cloneStringMap(requestContext.GetFileContents())
+		fileContents = guardStringMap(
+			requestContext.GetFileContents(),
+			"request_context.file_contents",
+			promptGuardRequestFileChars,
+			promptGuardRequestFilesTotalChars,
+			promptGuardRequestFilesMaxCount,
+		)
 	}
 
 	stream.mu.Lock()

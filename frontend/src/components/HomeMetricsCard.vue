@@ -6,14 +6,84 @@ import { appState, saveIncludeCacheWriteInHitRate } from "@/state/appState";
 import { formatCompactInteger, formatInteger } from "@/utils/numberFormat";
 import { computed, ref } from "vue";
 
-const emit = defineEmits(["refresh", "open-ad"]);
+const emit = defineEmits(["refresh"]);
 
-const TOKEN_PRICE_PER_MILLION = {
-  input: 5,
-  output: 25,
-  cacheRead: 0.5,
-  cacheWrite: 6.25,
-};
+const COST_PROFILES = [
+  {
+    id: "claude-opus-4.7",
+    label: "Claude Opus 4.7",
+    prices: {
+      standard: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
+    },
+  },
+  {
+    id: "claude-opus-4.8",
+    label: "Claude Opus 4.8",
+    prices: {
+      standard: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
+    },
+  },
+  {
+    id: "claude-fable-5",
+    label: "Claude Fable 5",
+    note: "缓存写入按 5 分钟价格估算；当前统计没有缓存 TTL 维度。",
+    prices: {
+      standard: { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
+    },
+  },
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6-sol",
+    prices: {
+      short: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 30 },
+      long: { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 45 },
+    },
+  },
+  {
+    id: "gpt-5.6-terra",
+    label: "GPT-5.6-terra",
+    prices: {
+      short: { input: 2.5, cacheRead: 0.25, cacheWrite: 3.125, output: 15 },
+      long: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 22.5 },
+    },
+  },
+  {
+    id: "gpt-5.6-luna",
+    label: "GPT-5.6-luna",
+    prices: {
+      short: { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 6 },
+      long: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 9 },
+    },
+  },
+];
+
+const selectedCostProfileID = ref("claude-opus-4.8");
+const selectedCostContextTier = ref("short");
+
+const selectedCostProfile = computed(() =>
+  COST_PROFILES.find((profile) => profile.id === selectedCostProfileID.value) || COST_PROFILES[0],
+);
+
+const selectedCostPrices = computed(() => {
+  const prices = selectedCostProfile.value.prices;
+  return prices[selectedCostContextTier.value] || prices.standard || prices.short;
+});
+
+const hasCostContextTiers = computed(() =>
+  Object.prototype.hasOwnProperty.call(selectedCostProfile.value.prices, "short"),
+);
+
+const costContextTierLabel = computed(() =>
+  selectedCostContextTier.value === "long" ? "长上下文" : "短上下文",
+);
+
+function selectCostProfile(profileID) {
+  selectedCostProfileID.value = profileID;
+  if (!Object.prototype.hasOwnProperty.call(selectedCostProfile.value.prices, selectedCostContextTier.value)) {
+    selectedCostContextTier.value = hasCostContextTiers.value ? "short" : "standard";
+  }
+}
+
 
 const props = defineProps({
   metrics: {
@@ -27,14 +97,6 @@ const props = defineProps({
   error: {
     type: String,
     default: "",
-  },
-  homeAd: {
-    type: Object,
-    default: null,
-  },
-  homeAds: {
-    type: Array,
-    default: () => [],
   },
 });
 
@@ -131,10 +193,11 @@ const completionTokensTotal = computed(() => {
 });
 
 const estimatedTokenCost = computed(() => {
-  const input = priceTokens(inputTokensTotal.value, TOKEN_PRICE_PER_MILLION.input);
-  const output = priceTokens(completionTokensTotal.value, TOKEN_PRICE_PER_MILLION.output);
-  const cacheRead = priceTokens(cacheReadTokensTotal.value, TOKEN_PRICE_PER_MILLION.cacheRead);
-  const cacheWrite = priceTokens(cacheWriteTokensTotal.value, TOKEN_PRICE_PER_MILLION.cacheWrite);
+  const prices = selectedCostPrices.value;
+  const input = priceTokens(inputTokensTotal.value, prices.input);
+  const output = priceTokens(completionTokensTotal.value, prices.output);
+  const cacheRead = priceTokens(cacheReadTokensTotal.value, prices.cacheRead);
+  const cacheWrite = priceTokens(cacheWriteTokensTotal.value, prices.cacheWrite);
   return {
     input,
     output,
@@ -181,32 +244,21 @@ const tokensTooltipContent = computed(() =>
   ].join("\n"),
 );
 
-const costTooltipContent = computed(() =>
-  [
-    "按 Claude Opus 4.7 价格估算。",
+const costTooltipContent = computed(() => {
+  const prices = selectedCostPrices.value;
+  const profileNote = selectedCostProfile.value.note ? `\n${selectedCostProfile.value.note}` : "";
+  return [
+    `按 ${selectedCostProfile.value.label}（${hasCostContextTiers.value ? costContextTierLabel.value : "标准价格"}）套算全部累计 Token。${profileNote}`,
     `缓存统计策略：${selectedCacheRateModeLabel.value}（${formatRateLabel(selectedCacheHitRate.value)}）`,
     "",
-    `普通输入：${formatMetricValue(inputTokensTotal.value)} × $${TOKEN_PRICE_PER_MILLION.input}/1M = ${formatUSD(estimatedTokenCost.value.input)}`,
-    `模型输出：${formatMetricValue(completionTokensTotal.value)} × $${TOKEN_PRICE_PER_MILLION.output}/1M = ${formatUSD(estimatedTokenCost.value.output)}`,
-    `缓存读取：${formatMetricValue(cacheReadTokensTotal.value)} × $${TOKEN_PRICE_PER_MILLION.cacheRead}/1M = ${formatUSD(estimatedTokenCost.value.cacheRead)}`,
-    `缓存写入：${formatMetricValue(cacheWriteTokensTotal.value)} × $${TOKEN_PRICE_PER_MILLION.cacheWrite}/1M = ${formatUSD(estimatedTokenCost.value.cacheWrite)}`,
+    `普通输入：${formatMetricValue(inputTokensTotal.value)} × $${prices.input}/1M = ${formatUSD(estimatedTokenCost.value.input)}`,
+    `模型输出：${formatMetricValue(completionTokensTotal.value)} × $${prices.output}/1M = ${formatUSD(estimatedTokenCost.value.output)}`,
+    `缓存读取：${formatMetricValue(cacheReadTokensTotal.value)} × $${prices.cacheRead}/1M = ${formatUSD(estimatedTokenCost.value.cacheRead)}`,
+    `缓存写入：${formatMetricValue(cacheWriteTokensTotal.value)} × $${prices.cacheWrite}/1M = ${formatUSD(estimatedTokenCost.value.cacheWrite)}`,
     "",
     `合计：${formatUSD(estimatedTokenCost.value.total)}`,
-  ].join("\n"),
-);
-
-function normalizeHomeAd(item, index) {
-  const source = item && typeof item === "object" ? item : {};
-  const title = typeof source.title === "string" ? source.title.trim() : "";
-  if (!title) {
-    return null;
-  }
-  return {
-    id: typeof source.id === "string" && source.id.trim() ? source.id.trim() : String(index + 1),
-    title,
-    subtitle: typeof source.subtitle === "string" ? source.subtitle.trim() : "",
-  };
-}
+  ].join("\n");
+});
 
 async function toggleIncludeCacheWriteInHitRate(value) {
   const nextValue = Boolean(value);
@@ -223,55 +275,39 @@ async function toggleIncludeCacheWriteInHitRate(value) {
     homeMetricsConfigSaving.value = false;
   }
 }
-
-const normalizedHomeAds = computed(() => {
-  const list = Array.isArray(props.homeAds) && props.homeAds.length > 0 ? props.homeAds : [props.homeAd];
-  return list.map(normalizeHomeAd).filter(Boolean);
-});
-
-const hasHomeAd = computed(() => normalizedHomeAds.value.length > 0);
 </script>
 
 <template>
   <div>
     <div class="flex flex-col gap-4">
-      <div class="flex items-center justify-between gap-4 h-[42px]">
-        <div v-if="!hasHomeAd" class="flex flex-col gap-1 w-[200px] shrink-0">
+      <div class="flex items-center justify-between gap-4 h-[32px]">
+        <div class="flex flex-col gap-1 shrink-0">
           <h2 class="text-[14px] font-medium text-white/80">会话统计</h2>
         </div>
-        <div v-else class="grid min-w-0  grid-cols-3 gap-2 shrink-0">
-          <div
-            v-for="ad in normalizedHomeAds"
-            :key="ad.id"
-            style="font-family: var(--font-num)"
-            class="center-row h-[42px] min-w-0 cursor-pointer gap-[8px] rounded-[6px] border border-[#343434] bg-[#242424] px-[8px] pr-[10px] text-left transition-colors duration-150 hover:border-[#4a4a4a] hover:bg-[#2a2a2a] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50"
-            role="button"
-            tabindex="0"
-            :title="ad.subtitle ? `${ad.title}\n${ad.subtitle}` : ad.title"
-            @click="emit('open-ad', ad.id)"
-            @keydown.enter.prevent="emit('open-ad', ad.id)"
-            @keydown.space.prevent="emit('open-ad', ad.id)"
+        <div class="flex-1 center-row justify-center gap-2">
+          <span class="text-xs text-[#6f6f6f] shrink-0">估算模型</span>
+          <select
+            :value="selectedCostProfileID"
+            class="h-[24px] rounded-[4px] border border-[#3b3b3b] bg-[#1f1f1f] px-1.5 text-[11px] text-[#cfcfcf] outline-none"
+            aria-label="估算模型"
+            @change="selectCostProfile($event.target.value)"
           >
-            <div
-              class="center-row h-[20px] w-[20px] shrink-0 justify-center text-[20px] text-amber-400"
-            >
-              <span class="icon-[cil--badge]"></span>
-            </div>
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-[13px] font-medium leading-[16px] text-white">
-                {{ ad.title }}
-              </div>
-              <div
-                v-if="ad.subtitle"
-                class="mt-[2px] center-row min-w-0 gap-[2px] text-[11px] leading-[12px] text-[#8A8A8A]"
-              >
-                <span class="truncate">{{ ad.subtitle }}</span>
-              </div>
-            </div>
-          </div>
+            <option v-for="profile in COST_PROFILES" :key="profile.id" :value="profile.id">
+              {{ profile.label }}
+            </option>
+          </select>
+          <select
+            v-if="hasCostContextTiers"
+            v-model="selectedCostContextTier"
+            class="h-[24px] rounded-[4px] border border-[#3b3b3b] bg-[#1f1f1f] px-1.5 text-[11px] text-[#cfcfcf] outline-none"
+            aria-label="上下文价格"
+          >
+            <option value="short">短上下文</option>
+            <option value="long">长上下文</option>
+          </select>
         </div>
         <div
-          class="flex-1 center-row justify-end shrink-0 gap-2 text-xs text-[#6f6f6f] pr-4 w-[200px]"
+          class="center-row justify-end shrink-0 gap-2 text-xs text-[#6f6f6f]"
         >
           <span>刷新统计</span>
           <button
@@ -290,7 +326,7 @@ const hasHomeAd = computed(() => normalizedHomeAds.value.length > 0);
       </div>
 
       <div
-        class="mt-[-4px] grid grid-cols-4 gap-0 overflow-hidden rounded-[8px] border border-[#343434] bg-[#242424] h-[130px]"
+        class="mt-[-4px] grid grid-cols-4 gap-0 overflow-hidden rounded-[8px] border border-[#343434] bg-[#242424] h-[152px]"
       >
         <div class="min-w-0 px-4 py-4 flex flex-col justify-between">
           <div class="center-row justify-start gap-1 text-xs text-[#7f7f7f]">
@@ -387,7 +423,7 @@ const hasHomeAd = computed(() => normalizedHomeAds.value.length > 0);
             >
               {{ formatUSD(estimatedTokenCost.total) }}
             </div>
-            <div class="mt-3 text-xs leading-5 text-[#8c8c8c]">
+            <div class="mt-3 truncate text-xs leading-5 text-[#8c8c8c]">
               缓存读写
               <span :title="formatUSD(estimatedTokenCost.cacheRead + estimatedTokenCost.cacheWrite)">
                 {{ formatUSD(estimatedTokenCost.cacheRead + estimatedTokenCost.cacheWrite) }}

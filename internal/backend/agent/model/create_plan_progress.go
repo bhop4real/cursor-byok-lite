@@ -1,13 +1,13 @@
 package modeladapter
 
 import (
+	"crypto/sha256"
 	"strings"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"cursor/gen/agentv1"
-	runtimecore "cursor/internal/backend/agent/core"
 )
 
 func emitCreatePlanToolProgress(
@@ -15,7 +15,7 @@ func emitCreatePlanToolProgress(
 	provider string,
 	model string,
 	callID string,
-	rawArgs string,
+	args *agentv1.CreatePlanArgs,
 	argsTextDelta string,
 	lastSnapshot *string,
 ) error {
@@ -26,15 +26,15 @@ func emitCreatePlanToolProgress(
 	if trimmedCallID == "" {
 		return nil
 	}
-	args, ok := createPlanArgsProgressSnapshot(rawArgs)
-	if !ok {
+	if !hasCreatePlanArgsProgress(args) {
 		return nil
 	}
 	signatureBytes, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(args)
 	if err != nil {
 		return err
 	}
-	signature := string(signatureBytes)
+	signatureSum := sha256.Sum256(signatureBytes)
+	signature := string(signatureSum[:])
 	if signature == "" || signature == *lastSnapshot {
 		return nil
 	}
@@ -57,31 +57,6 @@ func emitCreatePlanToolProgress(
 		return err
 	}
 	return nil
-}
-
-func createPlanArgsProgressSnapshot(rawArgs string) (*agentv1.CreatePlanArgs, bool) {
-	trimmed := strings.TrimSpace(rawArgs)
-	if trimmed == "" {
-		return nil, false
-	}
-	if args, err := runtimecore.DecodeCreatePlanArgsJSON([]byte(trimmed)); err == nil && hasCreatePlanArgsProgress(args) {
-		return args, true
-	}
-
-	args := &agentv1.CreatePlanArgs{}
-	if value, found, _ := extractJSONStringFieldPrefix(trimmed, "plan"); found {
-		args.Plan = value
-	}
-	if value, found, _ := extractJSONStringFieldPrefix(trimmed, "overview"); found {
-		args.Overview = value
-	}
-	if value, found, complete := extractJSONStringFieldPrefix(trimmed, "name"); found && complete {
-		args.Name = strings.TrimSpace(value)
-	}
-	if !hasCreatePlanArgsProgress(args) {
-		return nil, false
-	}
-	return args, true
 }
 
 func hasCreatePlanArgsProgress(args *agentv1.CreatePlanArgs) bool {

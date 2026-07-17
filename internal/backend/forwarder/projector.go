@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -14,18 +15,65 @@ import (
 	promptengine "cursor/internal/backend/agent/prompt"
 )
 
-const projectedConversationMaxTokens = 130000
+const (
+	projectedConversationMaxTokens   = 130000
+	historyProjectionCacheMaxEntries = 16
+)
 
 type HistoryProjector struct {
+	mu          sync.Mutex
+	replayCache map[string]*historyProjectionCacheEntry
+	cacheClock  uint64
+}
+
+type historyProjectionCacheEntry struct {
+	contextVersion     int64
+	messages           []modeladapter.Message
+	stableTurnSeq      int64
+	stableMessageCount int
+	stableCountReady   bool
+	lastAccess         uint64
 }
 
 // NewHistoryProjector 创建 history 投影器。
 func NewHistoryProjector() *HistoryProjector {
-	return &HistoryProjector{}
+	return &HistoryProjector{
+		replayCache: make(map[string]*historyProjectionCacheEntry),
+	}
 }
 
 // ProjectPromptReplay 把 conversation history 还原为 provider 可消费的消息列表。
 func (projector *HistoryProjector) ProjectPromptReplay(conversation *ConversationFile) ([]modeladapter.Message, error) {
+	if messages, ok := projector.cachedPromptReplay(conversation); ok {
+		return messages, nil
+	}
+	messages, err := projector.projectPromptReplay(conversation)
+	if err != nil {
+		return nil, err
+	}
+	projector.cachePromptReplay(conversation, messages)
+	return messages, nil
+}
+
+func (projector *HistoryProjector) StablePromptReplayMessageCount(conversation *ConversationFile, currentTurnSeq int64) (int, error) {
+	if projector == nil || conversation == nil || currentTurnSeq <= 0 {
+		return 0, nil
+	}
+	if count, ok := projector.cachedStablePromptReplayMessageCount(conversation, currentTurnSeq); ok {
+		return count, nil
+	}
+	stableConversation := *conversation
+	stableConversation.Entries = stableReplayEntriesBeforeTurn(conversation.Entries, currentTurnSeq)
+	stableMessages, err := projector.projectPromptReplay(&stableConversation)
+	if err != nil {
+		return 0, err
+	}
+	count := len(stableMessages)
+	projector.cacheStablePromptReplayMessageCount(conversation, currentTurnSeq, count)
+	return count, nil
+}
+
+func (projector *HistoryProjector) projectPromptReplay(conversation *ConversationFile) ([]modeladapter.Message, error) {
 	if conversation == nil {
 		return nil, nil
 	}
@@ -259,6 +307,114 @@ func (projector *HistoryProjector) ProjectPromptReplay(conversation *Conversatio
 	return normalizeReplayMessageSequence(messages), nil
 }
 
+func (projector *HistoryProjector) cachedPromptReplay(conversation *ConversationFile) ([]modeladapter.Message, bool) {
+	conversationID, contextVersion, ok := promptReplayCacheIdentity(conversation)
+	if projector == nil || !ok {
+		return nil, false
+	}
+	projector.mu.Lock()
+	defer projector.mu.Unlock()
+	entry := projector.replayCache[conversationID]
+	if entry == nil || entry.contextVersion != contextVersion {
+		return nil, false
+	}
+	projector.cacheClock++
+	entry.lastAccess = projector.cacheClock
+	return cloneReplayMessages(entry.messages), true
+}
+
+func (projector *HistoryProjector) cachedStablePromptReplayMessageCount(conversation *ConversationFile, currentTurnSeq int64) (int, bool) {
+	conversationID, contextVersion, ok := promptReplayCacheIdentity(conversation)
+	if projector == nil || !ok {
+		return 0, false
+	}
+	projector.mu.Lock()
+	defer projector.mu.Unlock()
+	entry := projector.replayCache[conversationID]
+	if entry == nil || entry.contextVersion != contextVersion || !entry.stableCountReady || entry.stableTurnSeq != currentTurnSeq {
+		return 0, false
+	}
+	projector.cacheClock++
+	entry.lastAccess = projector.cacheClock
+	return entry.stableMessageCount, true
+}
+
+func (projector *HistoryProjector) cacheStablePromptReplayMessageCount(conversation *ConversationFile, currentTurnSeq int64, count int) {
+	conversationID, contextVersion, ok := promptReplayCacheIdentity(conversation)
+	if projector == nil || !ok {
+		return
+	}
+	projector.mu.Lock()
+	defer projector.mu.Unlock()
+	entry := projector.replayCache[conversationID]
+	if entry == nil || entry.contextVersion != contextVersion {
+		return
+	}
+	projector.cacheClock++
+	entry.stableTurnSeq = currentTurnSeq
+	entry.stableMessageCount = count
+	entry.stableCountReady = true
+	entry.lastAccess = projector.cacheClock
+}
+
+func (projector *HistoryProjector) cachePromptReplay(conversation *ConversationFile, messages []modeladapter.Message) {
+	conversationID, contextVersion, ok := promptReplayCacheIdentity(conversation)
+	if projector == nil || !ok {
+		return
+	}
+	cachedMessages := cloneReplayMessages(messages)
+	projector.mu.Lock()
+	defer projector.mu.Unlock()
+	if projector.replayCache == nil {
+		projector.replayCache = make(map[string]*historyProjectionCacheEntry)
+	}
+	projector.cacheClock++
+	projector.replayCache[conversationID] = &historyProjectionCacheEntry{
+		contextVersion: contextVersion,
+		messages:       cachedMessages,
+		lastAccess:     projector.cacheClock,
+	}
+	for len(projector.replayCache) > historyProjectionCacheMaxEntries {
+		oldestConversationID := ""
+		oldestAccess := ^uint64(0)
+		for candidateID, candidate := range projector.replayCache {
+			if candidate != nil && candidate.lastAccess < oldestAccess {
+				oldestConversationID = candidateID
+				oldestAccess = candidate.lastAccess
+			}
+		}
+		if oldestConversationID == "" {
+			break
+		}
+		delete(projector.replayCache, oldestConversationID)
+	}
+}
+
+func promptReplayCacheIdentity(conversation *ConversationFile) (string, int64, bool) {
+	if conversation == nil || conversation.ContextVersion <= 0 {
+		return "", 0, false
+	}
+	conversationID := strings.TrimSpace(conversation.ConversationID)
+	if conversationID == "" {
+		return "", 0, false
+	}
+	return conversationID, conversation.ContextVersion, true
+}
+
+// InvalidateConversation 丢弃会重写既有 entry sequence 的会话投影。
+func (projector *HistoryProjector) InvalidateConversation(conversationID string) {
+	if projector == nil {
+		return
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return
+	}
+	projector.mu.Lock()
+	delete(projector.replayCache, normalizedConversationID)
+	projector.mu.Unlock()
+}
+
 func compactedPromptProjectionEntries(entries []HistoryEntry) []HistoryEntry {
 	if len(entries) == 0 {
 		return nil
@@ -475,6 +631,15 @@ func isHistoricalReplayToolResult(conversation *ConversationFile, entry HistoryE
 
 // ProjectLegacyCheckpoint 按需从 JSON history 投影出兼容旧客户端的 checkpoint 结构。
 func (projector *HistoryProjector) ProjectLegacyCheckpoint(conversation *ConversationFile) (*agentv1.ConversationStateStructure, error) {
+	replayMessages, err := projector.ProjectPromptReplay(conversation)
+	if err != nil {
+		return nil, err
+	}
+	return projector.ProjectLegacyCheckpointWithReplay(conversation, replayMessages)
+}
+
+// ProjectLegacyCheckpointWithReplay 复用已投影的 prompt replay 构造 checkpoint。
+func (projector *HistoryProjector) ProjectLegacyCheckpointWithReplay(conversation *ConversationFile, replayMessages []modeladapter.Message) (*agentv1.ConversationStateStructure, error) {
 	state := &agentv1.ConversationStateStructure{
 		TokenDetails: &agentv1.ConversationTokenDetails{
 			UsedTokens: conversationTokenDetailsUsedTokens(conversation),
@@ -658,10 +823,6 @@ func (projector *HistoryProjector) ProjectLegacyCheckpoint(conversation *Convers
 		}
 		state.Turns = append(state.Turns, turnPayload)
 	}
-	replayMessages, err := projector.ProjectPromptReplay(conversation)
-	if err != nil {
-		return nil, err
-	}
 	promptReplay := make([]promptengine.Message, 0, len(replayMessages))
 	for _, message := range replayMessages {
 		promptReplay = append(promptReplay, promptengine.Message{
@@ -838,6 +999,17 @@ func isProviderPromptReplaySuppressedToolName(toolName string) bool {
 	default:
 		return false
 	}
+}
+
+func cloneReplayMessages(messages []modeladapter.Message) []modeladapter.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]modeladapter.Message, len(messages))
+	for index, message := range messages {
+		cloned[index] = cloneReplayModelMessage(message)
+	}
+	return cloned
 }
 
 func cloneReplayModelMessage(message modeladapter.Message) modeladapter.Message {

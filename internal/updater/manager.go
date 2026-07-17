@@ -38,6 +38,7 @@ const (
 )
 
 var errNoSupportedAsset = errors.New("no supported update asset for current platform")
+var errUpdatesDisabled = errors.New("自动更新已禁用，请在下次启动前重新启用")
 
 type manifest struct {
 	Version      string                      `json:"version"`
@@ -60,6 +61,19 @@ type UpdateInfo struct {
 	Mandatory    bool
 	PlatformKey  string
 	Asset        manifestPlatform
+	Source       string
+	Modified     bool
+}
+
+type updateSource struct {
+	name     string
+	baseURL  string
+	modified bool
+}
+
+var updateSources = []updateSource{
+	{name: "original", baseURL: buildinfo.OriginalUpdateBaseURL},
+	{name: "modified", baseURL: buildinfo.ModifiedUpdateBaseURL, modified: true},
 }
 
 type Manager struct {
@@ -69,35 +83,92 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu             sync.Mutex
-	state          State
-	currentInfo    *UpdateInfo
-	readyInfo      *UpdateInfo
-	downloadedPath string
+	mu              sync.Mutex
+	workers         sync.WaitGroup
+	state           State
+	currentInfo     *UpdateInfo
+	readyInfo       *UpdateInfo
+	downloadedPath  string
+	updatesDisabled bool
+	closed          bool
 }
 
-func NewManager(app *application.App) *Manager {
+func NewManager(app *application.App, updatesDisabled bool) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
+	var client *http.Client
+	if !updatesDisabled {
+		client = netproxy.NewHTTPClient(5 * time.Minute)
+	}
 	return &Manager{
-		app:    app,
-		client: netproxy.NewHTTPClient(5 * time.Minute),
-		ctx:    ctx,
-		cancel: cancel,
-		state:  StateIdle,
+		app:             app,
+		client:          client,
+		ctx:             ctx,
+		cancel:          cancel,
+		state:           StateIdle,
+		updatesDisabled: updatesDisabled,
 	}
 }
 
 func (m *Manager) Start() {
+	if m == nil || m.updatesDisabled {
+		if m != nil {
+			m.emitState(StateIdle, nil, "", "自动更新已禁用，设置将在下次启动时生效。", false, "")
+		}
+		return
+	}
 	m.emitState(StateIdle, nil, "", "", false, "")
-	go m.loop()
+	m.launch(m.loop)
 }
 
 func (m *Manager) Shutdown() {
-	m.cancel()
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		if m.cancel != nil {
+			m.cancel()
+		}
+	}
+	m.mu.Unlock()
+	m.workers.Wait()
+	m.mu.Lock()
+	client := m.client
+	m.client = nil
+	m.mu.Unlock()
+	netproxy.CloseHTTPClient(client)
 }
 
-func (m *Manager) CheckNow(manual bool) {
-	go m.checkNow(manual)
+func (m *Manager) launch(worker func()) bool {
+	if m == nil || worker == nil {
+		return false
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return false
+	}
+	m.workers.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.workers.Done()
+		worker()
+	}()
+	return true
+}
+
+func (m *Manager) CheckNow(manual bool) error {
+	if m == nil {
+		return errors.New("更新管理器未初始化")
+	}
+	if m.updatesDisabled {
+		return errUpdatesDisabled
+	}
+	if !m.launch(func() { m.checkNow(manual) }) {
+		return errors.New("更新管理器已关闭")
+	}
+	return nil
 }
 
 func (m *Manager) InstallReadyUpdate() error {
@@ -165,7 +236,7 @@ func (m *Manager) checkNow(manual bool) {
 		return
 	}
 
-	logger.Infof("发现新版本：current=%s latest=%s platform=%s", buildinfo.CurrentVersion(), info.Version, info.PlatformKey)
+	logger.Infof("发现新版本：current=%s latest=%s source=%s platform=%s", buildinfo.CurrentVersion(), info.Version, info.Source, info.PlatformKey)
 	m.setState(StateDownloading, info, "")
 	m.emitState(StateDownloading, info, "", "", false, "")
 
@@ -183,47 +254,90 @@ func (m *Manager) checkNow(manual bool) {
 }
 
 func (m *Manager) fetchUpdateInfo(ctx context.Context) (*UpdateInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, buildinfo.UpdateBaseURL+"update.json", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("update manifest request failed: %s", resp.Status)
-	}
-
-	var data manifest
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-
-	if compareVersions(data.Version, buildinfo.CurrentVersion()) <= 0 {
-		return nil, nil
-	}
-
 	platformKey, err := currentPlatformKey()
 	if err != nil {
 		return nil, err
 	}
 
+	type sourceResult struct {
+		info *UpdateInfo
+		err  error
+	}
+	results := make(chan sourceResult, len(updateSources))
+	for _, source := range updateSources {
+		source := source
+		go func() {
+			info, err := m.fetchSourceUpdateInfo(ctx, source, platformKey)
+			results <- sourceResult{info: info, err: err}
+		}()
+	}
+
+	candidates := make([]*UpdateInfo, 0, len(updateSources))
+	errs := make([]error, 0, len(updateSources))
+	for range updateSources {
+		result := <-results
+		if result.err != nil {
+			errs = append(errs, result.err)
+			continue
+		}
+		candidates = append(candidates, result.info)
+	}
+	if len(candidates) == 0 {
+		return nil, errors.Join(errs...)
+	}
+
+	selected := candidates[0]
+	for _, candidate := range candidates[1:] {
+		comparison := compareVersionNumbers(candidate.Version, selected.Version)
+		if comparison > 0 || comparison == 0 && candidate.Modified && !selected.Modified {
+			selected = candidate
+		}
+	}
+	if compareVersions(selected.Version, buildinfo.CurrentVersion()) <= 0 {
+		return nil, nil
+	}
+	return selected, nil
+}
+
+func (m *Manager) fetchSourceUpdateInfo(ctx context.Context, source updateSource, platformKey string) (*UpdateInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source.baseURL+"update.json", nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s update source: %w", source.name, err)
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s update source: %w", source.name, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s update manifest request failed: %s", source.name, resp.Status)
+	}
+
+	var data manifest
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("%s update manifest: %w", source.name, err)
+	}
+	version := strings.TrimSpace(data.Version)
+	if version == "" {
+		return nil, fmt.Errorf("%s update manifest has empty version", source.name)
+	}
+
 	asset, ok := data.Platforms[platformKey]
 	if !ok {
-		return nil, errNoSupportedAsset
+		return nil, fmt.Errorf("%s update source: %w", source.name, errNoSupportedAsset)
 	}
 
 	return &UpdateInfo{
-		Version:      strings.TrimSpace(data.Version),
+		Version:      version,
 		ReleaseDate:  strings.TrimSpace(data.ReleaseDate),
 		ReleaseNotes: strings.TrimSpace(data.ReleaseNotes),
 		Mandatory:    data.Mandatory,
 		PlatformKey:  platformKey,
 		Asset:        asset,
+		Source:       source.name,
+		Modified:     source.modified,
 	}, nil
 }
 
@@ -278,6 +392,9 @@ func (m *Manager) downloadUpdate(ctx context.Context, info *UpdateInfo) (string,
 }
 
 func (m *Manager) installReadyUpdate() error {
+	if m == nil || m.updatesDisabled {
+		return errUpdatesDisabled
+	}
 	m.mu.Lock()
 	if m.state != StateReady || m.readyInfo == nil || m.downloadedPath == "" {
 		m.mu.Unlock()

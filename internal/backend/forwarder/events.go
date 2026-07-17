@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"cursor/gen/agentv1"
@@ -223,24 +222,21 @@ func buildTurnEndedMessage(inputTokens int64, outputTokens int64, cacheReadToken
 	}
 }
 
-// buildCheckpointMessage 根据投影出的状态生成 legacy checkpoint 消息。
+// buildCheckpointMessage 接管刚投影出的状态并生成 legacy checkpoint 消息。
 func buildCheckpointMessage(state *agentv1.ConversationStateStructure) *agentv1.AgentServerMessage {
-	cloned := &agentv1.ConversationStateStructure{}
-	if state != nil {
-		if next, ok := proto.Clone(state).(*agentv1.ConversationStateStructure); ok && next != nil {
-			cloned = next
-		}
+	if state == nil {
+		state = &agentv1.ConversationStateStructure{}
 	}
-	if cloned.TokenDetails == nil {
-		cloned.TokenDetails = &agentv1.ConversationTokenDetails{}
+	if state.TokenDetails == nil {
+		state.TokenDetails = &agentv1.ConversationTokenDetails{}
 	}
-	if cloned.TokenDetails.MaxTokens == 0 {
-		cloned.TokenDetails.MaxTokens = projectedConversationMaxTokens
+	if state.TokenDetails.MaxTokens == 0 {
+		state.TokenDetails.MaxTokens = projectedConversationMaxTokens
 	}
-	cloned.TurnTimings = nil
+	state.TurnTimings = nil
 	return &agentv1.AgentServerMessage{
 		Message: &agentv1.AgentServerMessage_ConversationCheckpointUpdate{
-			ConversationCheckpointUpdate: cloned,
+			ConversationCheckpointUpdate: state,
 		},
 	}
 }

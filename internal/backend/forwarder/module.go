@@ -32,3 +32,12 @@ func NewModule(historyRoot string, channelService modeladapter.ChannelResolver) 
 		UploadServiceHandler:     newUploadServiceHandler(service),
 	}
 }
+
+// Close 释放模块持有的长生命周期资源。
+func (module *Module) Close() {
+	if module == nil || module.Service == nil {
+		return
+	}
+	module.Service.Close()
+	module.Service = nil
+}

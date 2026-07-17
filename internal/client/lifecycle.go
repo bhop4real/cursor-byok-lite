@@ -253,7 +253,7 @@ func (s *ProxyService) ShutdownForQuit() {
 	var finalErr error
 
 	if s.proxy != nil {
-		if err := s.proxy.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := s.proxy.Close(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			finalErr = err
 		}
 	}
@@ -261,7 +261,7 @@ func (s *ProxyService) ShutdownForQuit() {
 		finalErr = errors.Join(finalErr, err)
 	}
 	if s.backendHost != nil {
-		if err := s.backendHost.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := s.backendHost.Close(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			finalErr = errors.Join(finalErr, err)
 		}
 	}

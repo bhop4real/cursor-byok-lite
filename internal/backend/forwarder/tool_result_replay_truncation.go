@@ -69,7 +69,7 @@ func projectedToolReplayLimit(toolName string) (int, bool) {
 		return projectedReadReplayLimit, true
 	case "Shell":
 		return projectedShellReplayLimit, true
-	case "Grep":
+	case "Grep", "Glob":
 		return projectedGrepReplayLimit, true
 	case "PatchEdit", "PatchEditLines", "PatchEditSpan":
 		return projectedPatchEditReplayLimit, true

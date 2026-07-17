@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"cursor/internal/ads"
 	"cursor/internal/appdata"
 	"cursor/internal/backend/forwarder"
 	"cursor/internal/backend/server"
@@ -37,7 +36,9 @@ type Host struct {
 
 	lastRunErr error
 
-	mux http.Handler
+	mux          http.Handler
+	agentModule  *forwarder.Module
+	upstreamHTTP *http.Client
 }
 
 func NewHost(store *serverconfig.Store) (*Host, error) {
@@ -178,13 +179,51 @@ func (host *Host) Stop(ctx context.Context) error {
 	}
 	host.runMu.Lock()
 	serverInstance := host.httpServer
-	host.httpServer = nil
+	if serverInstance != nil {
+		if err := serverInstance.Shutdown(ctx); err != nil {
+			host.runMu.Unlock()
+			return err
+		}
+		if host.httpServer == serverInstance {
+			host.httpServer = nil
+		}
+	}
+	agentModule, upstreamHTTP := host.detachResourcesLocked()
 	host.runMu.Unlock()
-	if serverInstance == nil {
+	closeHostResources(agentModule, upstreamHTTP)
+	return nil
+}
+
+// Close stops the host and releases its loopback client.
+func (host *Host) Close(ctx context.Context) error {
+	if host == nil {
 		return nil
 	}
-	err := serverInstance.Shutdown(ctx)
+	err := host.Stop(ctx)
+	host.runMu.Lock()
+	healthHTTP := host.healthHTTP
+	host.healthHTTP = nil
+	host.runMu.Unlock()
+	if healthHTTP != nil {
+		healthHTTP.CloseIdleConnections()
+	}
 	return err
+}
+
+func (host *Host) detachResourcesLocked() (*forwarder.Module, *http.Client) {
+	agentModule := host.agentModule
+	upstreamHTTP := host.upstreamHTTP
+	host.agentModule = nil
+	host.upstreamHTTP = nil
+	host.mux = nil
+	return agentModule, upstreamHTTP
+}
+
+func closeHostResources(agentModule *forwarder.Module, upstreamHTTP *http.Client) {
+	if agentModule != nil {
+		agentModule.Close()
+	}
+	netproxy.CloseHTTPClient(upstreamHTTP)
 }
 
 func (host *Host) HealthCheck(ctx context.Context) error {
@@ -268,21 +307,21 @@ func (host *Host) rebuild(cfg serverconfig.Config) error {
 func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 	host.listenAddr = cfg.BackendListenAddr
 	agentModule := forwarder.NewModule(appdata.HistoryRootPath(), host.configs)
+	upstreamHTTP := netproxy.NewHTTPClient(30000 * time.Second)
 	legacyBidiAppendProcedure := "/aiserver.v1.BidiService/BidiAppend"
 	legacyRunSSEProcedure := "/agent.v1.AgentService/RunSSE"
 	routeDeps := upstream.Dependencies{
 		SystemSettingService: &serverSystemSettings{configs: host.configs},
-		HTTPClient:           netproxy.NewHTTPClient(30000 * time.Second),
+		HTTPClient:           upstreamHTTP,
 	}
 
-	host.mux = server.New(
+	mux := server.New(
 		server.Use(
 			server.Recover(),
 			server.ServerContext(),
 			server.PolicyMiddleware(host.configs),
 			server.ErrorEncoder(),
 		),
-		server.Mount(ads.RoutePrefix, ads.NewHTTPHandler(appdata.AdsRootPath())),
 		server.GET(healthPath,
 			server.Name("healthz"),
 			server.HTTP(),
@@ -695,6 +734,11 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 		),
 	)
 
+	previousModule, previousUpstreamHTTP := host.agentModule, host.upstreamHTTP
+	host.mux = mux
+	host.agentModule = agentModule
+	host.upstreamHTTP = upstreamHTTP
+	closeHostResources(previousModule, previousUpstreamHTTP)
 	return nil
 }
 

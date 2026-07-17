@@ -12,7 +12,7 @@ type semanticVersion struct {
 	prerelease string
 }
 
-func compareVersions(a, b string) int {
+func compareVersionNumbers(a, b string) int {
 	left := parseVersion(a)
 	right := parseVersion(b)
 
@@ -21,18 +21,26 @@ func compareVersions(a, b string) int {
 		return compareInts(left.major, right.major)
 	case left.minor != right.minor:
 		return compareInts(left.minor, right.minor)
-	case left.patch != right.patch:
+	default:
 		return compareInts(left.patch, right.patch)
 	}
+}
 
+func compareVersions(a, b string) int {
+	left := parseVersion(a)
+	right := parseVersion(b)
+
+	if result := compareVersionNumbers(a, b); result != 0 {
+		return result
+	}
+
+	leftRank := prereleaseRank(left.prerelease)
+	rightRank := prereleaseRank(right.prerelease)
+	if leftRank != rightRank {
+		return compareInts(leftRank, rightRank)
+	}
 	if left.prerelease == right.prerelease {
 		return 0
-	}
-	if left.prerelease == "" {
-		return 1
-	}
-	if right.prerelease == "" {
-		return -1
 	}
 	if left.prerelease > right.prerelease {
 		return 1
@@ -41,6 +49,18 @@ func compareVersions(a, b string) int {
 		return -1
 	}
 	return 0
+}
+
+func prereleaseRank(value string) int {
+	switch value {
+	case "lite":
+		// Lite is this product's enhanced channel and supersedes the matching stable build.
+		return 2
+	case "":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func parseVersion(raw string) semanticVersion {

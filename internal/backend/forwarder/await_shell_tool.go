@@ -15,7 +15,14 @@ import (
 	runtimecore "cursor/internal/backend/agent/core"
 )
 
-const awaitShellOutputLimit = 16 * 1024
+const (
+	awaitShellOutputLimit            = 16 * 1024
+	shellOutputTailLimit             = 256 * 1024
+	backgroundShellMaxRetained       = 16
+	backgroundShellHardMaxRetained   = 32
+	backgroundShellActionMaxRetained = 64
+	backgroundShellRetentionTTL      = 10 * time.Minute
+)
 
 const (
 	backgroundShellStatusBackgrounded     = "backgrounded"
@@ -45,8 +52,8 @@ type awaitShellResult struct {
 	ExitCode       *int64  `json:"exit_code,omitempty"`
 	Stdout         string  `json:"stdout,omitempty"`
 	Stderr         string  `json:"stderr,omitempty"`
-	StdoutOffset   int     `json:"stdout_offset,omitempty"`
-	StderrOffset   int     `json:"stderr_offset,omitempty"`
+	StdoutOffset   int64   `json:"stdout_offset,omitempty"`
+	StderrOffset   int64   `json:"stderr_offset,omitempty"`
 	RuntimeMS      uint64  `json:"runtime_ms,omitempty"`
 	OutputLength   uint64  `json:"output_length,omitempty"`
 	RegexRequested bool    `json:"regex_requested,omitempty"`
@@ -116,6 +123,7 @@ func (service *Service) awaitShellSnapshot(stream *ActiveStream, args awaitShell
 	service.refreshBackgroundShellFromTerminalFile(stream, shellID)
 
 	stream.mu.Lock()
+	pruneBackgroundShellsLocked(stream, time.Now().UTC())
 	state, ok := stream.BackgroundShells[shellID]
 	if !ok || state == nil {
 		stream.mu.Unlock()
@@ -126,12 +134,8 @@ func (service *Service) awaitShellSnapshot(stream *ActiveStream, args awaitShell
 			Message:  "unknown or expired shell_id",
 		}
 	}
-	stdoutStart := clampOffset(state.AwaitStdoutOffset, len(state.StdoutBuffer))
-	stderrStart := clampOffset(state.AwaitStderrOffset, len(state.StderrBuffer))
-	stdout := state.StdoutBuffer[stdoutStart:]
-	stderr := state.StderrBuffer[stderrStart:]
-	stdoutEnd := len(state.StdoutBuffer)
-	stderrEnd := len(state.StderrBuffer)
+	stdout, stdoutEnd, stdoutPrefixDropped := shellOutputSince(state.StdoutBuffer, state.StdoutDroppedBytes, state.AwaitStdoutOffset)
+	stderr, stderrEnd, stderrPrefixDropped := shellOutputSince(state.StderrBuffer, state.StderrDroppedBytes, state.AwaitStderrOffset)
 	state.AwaitStdoutOffset = stdoutEnd
 	state.AwaitStderrOffset = stderrEnd
 	status := strings.TrimSpace(state.Status)
@@ -145,31 +149,45 @@ func (service *Service) awaitShellSnapshot(stream *ActiveStream, args awaitShell
 	}
 	createdAt := state.CreatedAt
 	completedAt := state.CompletedAt
-	combinedOutput := state.StdoutBuffer + "\n" + state.StderrBuffer
+	outputLength := stdoutEnd + stderrEnd
+	pattern := strings.TrimSpace(args.Pattern)
+	var combinedOutput []byte
+	if pattern != "" {
+		combinedOutput = make([]byte, 0, len(state.StdoutBuffer)+1+len(state.StderrBuffer))
+		combinedOutput = append(combinedOutput, state.StdoutBuffer...)
+		combinedOutput = append(combinedOutput, '\n')
+		combinedOutput = append(combinedOutput, state.StderrBuffer...)
+	}
+	stdoutText := truncateAwaitShellOutput(stdout, "stdout")
+	stderrText := truncateAwaitShellOutput(stderr, "stderr")
 	stream.UpdatedAt = time.Now().UTC()
 	stream.mu.Unlock()
 
-	matched, matchText, patternErr := awaitShellPatternMatched(args.Pattern, combinedOutput)
+	matched, matchText, patternErr := awaitShellPatternMatched(pattern, combinedOutput)
 	message := ""
 	if patternErr != nil {
 		message = patternErr.Error()
 	}
+	if stdoutPrefixDropped {
+		stdoutText = shellOutputPrefixTruncatedNotice("stdout") + stdoutText
+	}
+	if stderrPrefixDropped {
+		stderrText = shellOutputPrefixTruncatedNotice("stderr") + stderrText
+	}
 	timedOut := blockUntilMS > 0 && !matched && !isBackgroundShellTerminalStatus(status)
-	stdout = truncateAwaitShellOutput(stdout)
-	stderr = truncateAwaitShellOutput(stderr)
 	return awaitShellResult{
 		ShellID:        shellID,
 		Status:         status,
 		Matched:        matched,
 		TimedOut:       timedOut,
 		ExitCode:       exitCode,
-		Stdout:         stdout,
-		Stderr:         stderr,
+		Stdout:         stdoutText,
+		Stderr:         stderrText,
 		StdoutOffset:   stdoutEnd,
 		StderrOffset:   stderrEnd,
 		RuntimeMS:      backgroundShellRuntimeMS(createdAt, completedAt),
-		OutputLength:   uint64(len(combinedOutput)),
-		RegexRequested: strings.TrimSpace(args.Pattern) != "",
+		OutputLength:   uint64(outputLength),
+		RegexRequested: pattern != "",
 		RegexMatch:     matchText,
 		Message:        message,
 	}
@@ -245,7 +263,7 @@ func backgroundShellRuntimeMS(createdAt time.Time, completedAt time.Time) uint64
 	return uint64(end.Sub(createdAt).Milliseconds())
 }
 
-func awaitShellPatternMatched(pattern string, output string) (bool, *string, error) {
+func awaitShellPatternMatched(pattern string, output []byte) (bool, *string, error) {
 	trimmed := strings.TrimSpace(pattern)
 	if trimmed == "" {
 		return false, nil, nil
@@ -254,28 +272,25 @@ func awaitShellPatternMatched(pattern string, output string) (bool, *string, err
 	if err != nil {
 		return false, nil, fmt.Errorf("invalid AwaitShell pattern: %w", err)
 	}
-	match := expr.FindString(output)
-	if match == "" {
+	match := expr.Find(output)
+	if len(match) == 0 {
 		return false, nil, nil
 	}
-	return true, &match, nil
+	matchText := string(match)
+	return true, &matchText, nil
 }
 
-func truncateAwaitShellOutput(value string) string {
+func truncateAwaitShellOutput(value []byte, streamName string) string {
 	if len(value) <= awaitShellOutputLimit {
-		return value
+		return string(value)
 	}
-	return value[len(value)-awaitShellOutputLimit:]
-}
-
-func clampOffset(offset int, length int) int {
-	if offset < 0 {
-		return 0
-	}
-	if offset > length {
-		return length
-	}
-	return offset
+	omitted := len(value) - awaitShellOutputLimit
+	return fmt.Sprintf(
+		"[truncated: %d earlier %s bytes omitted from this response]\n%s",
+		omitted,
+		strings.TrimSpace(streamName),
+		value[omitted:],
+	)
 }
 
 type terminalShellFileSnapshot struct {
@@ -319,8 +334,8 @@ func (service *Service) refreshBackgroundShellFromTerminalFile(stream *ActiveStr
 	if state.CreatedAt.IsZero() {
 		state.CreatedAt = firstNonZeroTime(terminalSnapshot.StartedAt, now)
 	}
-	if state.StdoutBuffer == "" && state.StderrBuffer == "" && terminalSnapshot.Output != "" {
-		state.StdoutBuffer = terminalSnapshot.Output
+	if len(state.StdoutBuffer) == 0 && len(state.StderrBuffer) == 0 && terminalSnapshot.Output != "" {
+		state.StdoutBuffer, state.StdoutDroppedBytes = appendBoundedShellTail(state.StdoutBuffer, state.StdoutDroppedBytes, []byte(terminalSnapshot.Output))
 		if !isBackgroundShellTerminalStatus(state.Status) {
 			state.Status = backgroundShellStatusRunning
 		}
@@ -339,6 +354,7 @@ func (service *Service) refreshBackgroundShellFromTerminalFile(stream *ActiveStr
 	if state.LastActivityAt.IsZero() {
 		state.LastActivityAt = now
 	}
+	pruneBackgroundShellsLocked(stream, now)
 	stream.UpdatedAt = now
 }
 
@@ -558,13 +574,13 @@ func (service *Service) observeBackgroundShellSpawnResultLocked(stream *ActiveSt
 	switch {
 	case result.GetRejected() != nil:
 		state.Status = backgroundShellStatusRejected
-		state.StderrBuffer += strings.TrimSpace(result.GetRejected().GetReason())
+		state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, strings.TrimSpace(result.GetRejected().GetReason()))
 	case result.GetPermissionDenied() != nil:
 		state.Status = backgroundShellStatusPermissionDenied
-		state.StderrBuffer += strings.TrimSpace(result.GetPermissionDenied().GetError())
+		state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, strings.TrimSpace(result.GetPermissionDenied().GetError()))
 	case result.GetError() != nil:
 		state.Status = backgroundShellStatusTransportClosed
-		state.StderrBuffer += strings.TrimSpace(result.GetError().GetError())
+		state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, strings.TrimSpace(result.GetError().GetError()))
 	default:
 		return false
 	}
@@ -637,6 +653,7 @@ func (service *Service) observeMissingShellExecClientMessage(stream *ActiveStrea
 }
 
 func (service *Service) observeShellStreamLocked(stream *ActiveStream, pending runtimecore.PendingExec, shellStream *agentv1.ShellStream, now time.Time) {
+	pruneBackgroundShellsLocked(stream, now)
 	if stream.BackgroundShells == nil {
 		stream.BackgroundShells = make(map[string]*BackgroundShellState)
 	}
@@ -677,7 +694,7 @@ func (service *Service) observeShellStreamLocked(stream *ActiveStream, pending r
 		if state == nil {
 			return
 		}
-		state.StdoutBuffer += execbridge.DecodeShellStdout(event.Stdout)
+		state.StdoutBuffer, state.StdoutDroppedBytes = appendBoundedShellTail(state.StdoutBuffer, state.StdoutDroppedBytes, []byte(execbridge.DecodeShellStdout(event.Stdout)))
 		state.Status = backgroundShellStatusRunning
 		state.LastActivityAt = now
 	case *agentv1.ShellStream_Stderr:
@@ -685,7 +702,7 @@ func (service *Service) observeShellStreamLocked(stream *ActiveStream, pending r
 		if state == nil {
 			return
 		}
-		state.StderrBuffer += event.Stderr.GetData()
+		state.StderrBuffer, state.StderrDroppedBytes = appendBoundedShellTail(state.StderrBuffer, state.StderrDroppedBytes, []byte(event.Stderr.GetData()))
 		state.Status = backgroundShellStatusRunning
 		state.LastActivityAt = now
 	case *agentv1.ShellStream_Exit:
@@ -705,7 +722,7 @@ func (service *Service) observeShellStreamLocked(stream *ActiveStream, pending r
 			return
 		}
 		state.Status = backgroundShellStatusRejected
-		state.StderrBuffer += strings.TrimSpace(event.Rejected.GetReason())
+		state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, strings.TrimSpace(event.Rejected.GetReason()))
 		state.LastActivityAt = now
 		state.CompletedAt = now
 	case *agentv1.ShellStream_PermissionDenied:
@@ -714,10 +731,11 @@ func (service *Service) observeShellStreamLocked(stream *ActiveStream, pending r
 			return
 		}
 		state.Status = backgroundShellStatusPermissionDenied
-		state.StderrBuffer += strings.TrimSpace(event.PermissionDenied.GetError())
+		state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, strings.TrimSpace(event.PermissionDenied.GetError()))
 		state.LastActivityAt = now
 		state.CompletedAt = now
 	}
+	pruneBackgroundShellsLocked(stream, now)
 	stream.UpdatedAt = now
 }
 
@@ -758,17 +776,17 @@ func observeBackgroundTaskCompletionLocked(stream *ActiveStream, completion *age
 	case agentv1.BackgroundTaskStatus_BACKGROUND_TASK_STATUS_SUCCESS:
 		state.Status = backgroundShellStatusCompleted
 		if detail != "" {
-			state.StdoutBuffer = appendBackgroundShellBuffer(state.StdoutBuffer, detail)
+			state.StdoutBuffer, state.StdoutDroppedBytes = appendBackgroundShellBuffer(state.StdoutBuffer, state.StdoutDroppedBytes, detail)
 		}
 	case agentv1.BackgroundTaskStatus_BACKGROUND_TASK_STATUS_ERROR:
 		state.Status = backgroundShellStatusTransportClosed
 		if detail != "" {
-			state.StderrBuffer = appendBackgroundShellBuffer(state.StderrBuffer, detail)
+			state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, detail)
 		}
 	case agentv1.BackgroundTaskStatus_BACKGROUND_TASK_STATUS_ABORTED:
 		state.Status = backgroundShellStatusTransportClosed
 		if detail != "" {
-			state.StderrBuffer = appendBackgroundShellBuffer(state.StderrBuffer, detail)
+			state.StderrBuffer, state.StderrDroppedBytes = appendBackgroundShellBuffer(state.StderrBuffer, state.StderrDroppedBytes, detail)
 		}
 	default:
 		if completion.GetReason() == agentv1.BackgroundTaskCompletionReason_BACKGROUND_TASK_COMPLETION_REASON_TASK_PROGRESS {
@@ -781,6 +799,7 @@ func observeBackgroundTaskCompletionLocked(stream *ActiveStream, completion *age
 	if completion.GetReason() == agentv1.BackgroundTaskCompletionReason_BACKGROUND_TASK_COMPLETION_REASON_TASK_FINISHED || isBackgroundShellTerminalStatus(state.Status) {
 		state.CompletedAt = now
 	}
+	pruneBackgroundShellsLocked(stream, now)
 	stream.UpdatedAt = now
 	return true
 }
@@ -818,8 +837,28 @@ func recordBackgroundShellActionLocked(stream *ActiveStream, toolCallID string, 
 	if stream.BackgroundShellActions == nil {
 		stream.BackgroundShellActions = make(map[string]time.Time)
 	}
+	cutoff := now.Add(-backgroundShellRetentionTTL)
+	for existingToolCallID, recordedAt := range stream.BackgroundShellActions {
+		if recordedAt.Before(cutoff) {
+			delete(stream.BackgroundShellActions, existingToolCallID)
+		}
+	}
 	if _, exists := stream.BackgroundShellActions[trimmedToolCallID]; exists {
 		return trimmedToolCallID, false
+	}
+	for len(stream.BackgroundShellActions) >= backgroundShellActionMaxRetained {
+		oldestToolCallID := ""
+		oldestRecordedAt := now
+		for existingToolCallID, recordedAt := range stream.BackgroundShellActions {
+			if oldestToolCallID == "" || recordedAt.Before(oldestRecordedAt) {
+				oldestToolCallID = existingToolCallID
+				oldestRecordedAt = recordedAt
+			}
+		}
+		if oldestToolCallID == "" {
+			break
+		}
+		delete(stream.BackgroundShellActions, oldestToolCallID)
 	}
 	stream.BackgroundShellActions[trimmedToolCallID] = now
 	stream.UpdatedAt = now
@@ -884,15 +923,123 @@ func shellToolCallIsBackgrounded(toolCall *agentv1.ToolCall) bool {
 	return shellToolCall.GetResult().GetIsBackground()
 }
 
-func appendBackgroundShellBuffer(current string, value string) string {
+func appendBoundedShellTail(current []byte, droppedBytes int64, value []byte) ([]byte, int64) {
+	if len(value) == 0 {
+		return current, droppedBytes
+	}
+	if len(value) >= shellOutputTailLimit {
+		return append([]byte(nil), value[len(value)-shellOutputTailLimit:]...), droppedBytes + int64(len(current)+len(value)-shellOutputTailLimit)
+	}
+	current = append(current, value...)
+	if len(current) <= shellOutputTailLimit {
+		return current, droppedBytes
+	}
+	drop := len(current) - shellOutputTailLimit
+	copy(current, current[drop:])
+	current = current[:shellOutputTailLimit]
+	return current, droppedBytes + int64(drop)
+}
+
+func shellOutputSince(current []byte, droppedBytes int64, offset int64) ([]byte, int64, bool) {
+	if droppedBytes < 0 {
+		droppedBytes = 0
+	}
+	end := droppedBytes + int64(len(current))
+	if offset < 0 {
+		offset = 0
+	}
+	prefixDropped := offset < droppedBytes
+	if offset < droppedBytes {
+		offset = droppedBytes
+	}
+	if offset > end {
+		offset = end
+	}
+	return current[int(offset-droppedBytes):], end, prefixDropped
+}
+
+func shellOutputPrefixTruncatedNotice(streamName string) string {
+	return fmt.Sprintf("[truncated: earlier %s output is no longer retained]\n", strings.TrimSpace(streamName))
+}
+
+func appendBackgroundShellBuffer(current []byte, droppedBytes int64, value string) ([]byte, int64) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return current
+		return current, droppedBytes
 	}
-	if current == "" || strings.HasSuffix(current, "\n") {
-		return current + trimmed
+	if len(current) > 0 && current[len(current)-1] != '\n' {
+		current, droppedBytes = appendBoundedShellTail(current, droppedBytes, []byte{'\n'})
 	}
-	return current + "\n" + trimmed
+	return appendBoundedShellTail(current, droppedBytes, []byte(trimmed))
+}
+
+func pruneBackgroundShellsLocked(stream *ActiveStream, now time.Time) {
+	if stream == nil || len(stream.BackgroundShells) == 0 {
+		return
+	}
+	cutoff := now.Add(-backgroundShellRetentionTTL)
+	for shellID, state := range stream.BackgroundShells {
+		if state == nil {
+			removeBackgroundShellLocked(stream, shellID)
+			continue
+		}
+		completedAt := firstNonZeroTime(state.CompletedAt, state.LastActivityAt)
+		if isBackgroundShellTerminalStatus(state.Status) && !completedAt.IsZero() && completedAt.Before(cutoff) {
+			removeBackgroundShellLocked(stream, shellID)
+		}
+	}
+	for len(stream.BackgroundShells) > backgroundShellMaxRetained {
+		oldestShellID := oldestBackgroundShellIDLocked(stream, true, now)
+		if oldestShellID == "" {
+			break
+		}
+		removeBackgroundShellLocked(stream, oldestShellID)
+	}
+	for len(stream.BackgroundShells) > backgroundShellHardMaxRetained {
+		oldestShellID := oldestBackgroundShellIDLocked(stream, false, now)
+		if oldestShellID == "" {
+			break
+		}
+		removeBackgroundShellLocked(stream, oldestShellID)
+	}
+}
+
+func oldestBackgroundShellIDLocked(stream *ActiveStream, terminalOnly bool, now time.Time) string {
+	oldestShellID := ""
+	oldestActivity := now
+	for shellID, state := range stream.BackgroundShells {
+		if state == nil || (terminalOnly && !isBackgroundShellTerminalStatus(state.Status)) {
+			continue
+		}
+		activity := firstNonZeroTime(state.CompletedAt, firstNonZeroTime(state.LastActivityAt, state.CreatedAt))
+		if oldestShellID == "" || activity.Before(oldestActivity) {
+			oldestShellID = shellID
+			oldestActivity = activity
+		}
+	}
+	return oldestShellID
+}
+
+func removeBackgroundShellLocked(stream *ActiveStream, shellID string) {
+	if stream == nil {
+		return
+	}
+	normalizedShellID := strings.TrimSpace(shellID)
+	state := stream.BackgroundShells[normalizedShellID]
+	delete(stream.BackgroundShells, normalizedShellID)
+	for messageID, mappedShellID := range stream.BackgroundShellsByMessageID {
+		if strings.TrimSpace(mappedShellID) == normalizedShellID {
+			delete(stream.BackgroundShellsByMessageID, messageID)
+		}
+	}
+	for execID, mappedShellID := range stream.BackgroundShellsByExecID {
+		if strings.TrimSpace(mappedShellID) == normalizedShellID {
+			delete(stream.BackgroundShellsByExecID, execID)
+		}
+	}
+	if state != nil && strings.TrimSpace(state.OriginalToolCallID) != "" {
+		delete(stream.BackgroundShellActions, strings.TrimSpace(state.OriginalToolCallID))
+	}
 }
 
 func ensureBackgroundShellStateLocked(stream *ActiveStream, shellID string, pending runtimecore.PendingExec, now time.Time) *BackgroundShellState {
@@ -900,6 +1047,7 @@ func ensureBackgroundShellStateLocked(stream *ActiveStream, shellID string, pend
 	if trimmedShellID == "" {
 		return nil
 	}
+	pruneBackgroundShellsLocked(stream, now)
 	if stream.BackgroundShells == nil {
 		stream.BackgroundShells = make(map[string]*BackgroundShellState)
 	}

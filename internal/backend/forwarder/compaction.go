@@ -358,9 +358,17 @@ func (service *Service) startPendingCompactionSummary(stream *ActiveStream, plan
 		newCompactionRequestEntry(plan),
 	}); err != nil {
 		cancel()
+		stream.mu.Lock()
+		stream.ProviderActive = false
+		stream.ProviderCancel = nil
+		stream.mu.Unlock()
 		return err
 	}
-	go service.runPendingCompaction(stream, token, clonePendingCompaction(plan), summaryModelCallID, ctx)
+	service.providerWorkers.Add(1)
+	go func() {
+		defer service.providerWorkers.Done()
+		service.runPendingCompaction(stream, token, clonePendingCompaction(plan), summaryModelCallID, ctx)
+	}()
 	return nil
 }
 
@@ -571,6 +579,9 @@ func (service *Service) applyCompactionPlan(stream *ActiveStream, conversationID
 	if err := applyCompactionToConversation(candidateConversation, plan, summaryText); err != nil {
 		return err
 	}
+	// Compaction rewrites existing sequences; never let validation reuse or populate
+	// the cache entry belonging to the pre-compaction history.
+	candidateConversation.ContextVersion = 0
 	latestUserText := ""
 	if plan.PreserveCurrentTurnInputs {
 		latestUserText = plan.CurrentUserText
@@ -595,6 +606,9 @@ func (service *Service) applyCompactionPlan(stream *ActiveStream, conversationID
 		if err != nil {
 			return err
 		}
+		if service.projector != nil {
+			service.projector.InvalidateConversation(conversationID)
+		}
 		stream.mu.Lock()
 		stream.CheckpointConversation = persisted
 		stream.UpdatedAt = time.Now().UTC()
@@ -613,6 +627,9 @@ func (service *Service) applyCompactionPlan(stream *ActiveStream, conversationID
 		clearConversationAutoCompactionState(item)
 		return nil
 	})
+	if err == nil && service.projector != nil {
+		service.projector.InvalidateConversation(conversationID)
+	}
 	return err
 }
 
@@ -1600,32 +1617,34 @@ func (service *Service) generateCompactionSummary(ctx context.Context, stream *A
 	if len(messages) == 0 {
 		return "", nil
 	}
-	accumulated := ""
+	var accumulated strings.Builder
 	usage := turnUsageSnapshot{}
 	err = service.provider.StartStream(ctx, ProviderRequest{
-		RequestID:      stream.RequestID,
-		ConversationID: stream.ConversationID,
-		RunID:          stream.RequestID,
-		ModelCallID:    modelCallID,
-		ModelID:        stream.ModelID,
-		Mode:           agentv1.AgentMode_AGENT_MODE_AGENT,
-		Messages:       messages,
-		MaxTokens:      compactionSummaryOutputMaxTokens,
-		CompileSummary: fmt.Sprintf("compaction trigger=%s source=%s turns=%d messages=%d", plan.Trigger, plan.RequestSource, plan.CompactTurnCount, plan.MessagesToCompact),
-		Observer:       service.recorder,
-		ArtifactPaths:  &modeladapter.LLMArtifactPaths{},
+		RequestID:           stream.RequestID,
+		ConversationID:      stream.ConversationID,
+		RunID:               stream.RequestID,
+		ModelCallID:         modelCallID,
+		ModelID:             stream.ModelID,
+		Mode:                agentv1.AgentMode_AGENT_MODE_AGENT,
+		Messages:            messages,
+		MaxTokens:           compactionSummaryOutputMaxTokens,
+		CompileSummary:      fmt.Sprintf("compaction trigger=%s source=%s turns=%d messages=%d", plan.Trigger, plan.RequestSource, plan.CompactTurnCount, plan.MessagesToCompact),
+		Observer:            service.recorder,
+		RawResponseObserver: service.rawProviderObserver(ctx),
+		ArtifactPaths:       &modeladapter.LLMArtifactPaths{},
 	}, func(event modeladapter.ModelEvent) error {
 		if err := providerLoopInterruptErr(ctx, stream, modelCallID); err != nil {
 			return err
 		}
 		switch event.Kind {
 		case modeladapter.ModelEventKindTextDelta:
-			accumulated += event.Text
-			if strings.TrimSpace(accumulated) == "" {
+			accumulated.WriteString(event.Text)
+			summary := strings.Clone(accumulated.String())
+			if strings.TrimSpace(summary) == "" {
 				return nil
 			}
 			return service.broker.Publish(stream.RequestID, StreamEvent{
-				Message: buildSummaryMessage(accumulated),
+				Message: buildSummaryMessage(summary),
 			})
 		case modeladapter.ModelEventKindThinkingDelta, modeladapter.ModelEventKindThinkingCompleted:
 			return nil
@@ -1674,7 +1693,7 @@ func (service *Service) generateCompactionSummary(ctx context.Context, stream *A
 	if err := service.recordTurnUsageSnapshot(stream, conversationID, turnSeq, requestID, modelCallID, "completed", usage, "", false); err != nil {
 		return "", fmt.Errorf("record compaction provider usage: %w", err)
 	}
-	return strings.TrimSpace(accumulated), nil
+	return strings.TrimSpace(accumulated.String()), nil
 }
 
 func existingConversationSummaryText(conversation *ConversationFile) string {

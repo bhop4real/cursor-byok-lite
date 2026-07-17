@@ -181,7 +181,7 @@ func (service *Service) projectSummaryInputHistoryMessages(conversation *Convers
 	}
 	inputConversation := cloneConversationFile(conversation)
 	inputConversation.Entries = filterConversationEntriesByKind(conversation.Entries, "user_message", "request_context", "prompt_context")
-	return service.projector.ProjectPromptReplay(inputConversation)
+	return service.projector.projectPromptReplay(inputConversation)
 }
 
 func (service *Service) projectSummaryOutputMessages(conversation *ConversationFile) ([]modeladapter.Message, error) {
@@ -190,7 +190,7 @@ func (service *Service) projectSummaryOutputMessages(conversation *ConversationF
 	}
 	outputConversation := cloneConversationFile(conversation)
 	outputConversation.Entries = filterConversationEntriesByKind(conversation.Entries, "assistant_text", "tool_call", "tool_result")
-	return service.projector.ProjectPromptReplay(outputConversation)
+	return service.projector.projectPromptReplay(outputConversation)
 }
 
 func filterConversationEntriesByKind(entries []HistoryEntry, kinds ...string) []HistoryEntry {

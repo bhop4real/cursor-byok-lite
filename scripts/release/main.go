@@ -17,7 +17,8 @@ import (
 )
 
 type buildConfig struct {
-	Info struct {
+	ReleaseVersion string `yaml:"releaseVersion"`
+	Info           struct {
 		Version string `yaml:"version"`
 	} `yaml:"info"`
 }
@@ -182,9 +183,12 @@ func readVersion(configPath string) (string, error) {
 		return "", err
 	}
 
-	version := strings.TrimSpace(strings.TrimPrefix(cfg.Info.Version, "v"))
+	version := strings.TrimSpace(strings.TrimPrefix(cfg.ReleaseVersion, "v"))
 	if version == "" {
-		return "", errors.New("build/config.yml info.version is empty")
+		version = strings.TrimSpace(strings.TrimPrefix(cfg.Info.Version, "v"))
+	}
+	if version == "" {
+		return "", errors.New("build/config.yml releaseVersion and info.version are empty")
 	}
 	return version, nil
 }

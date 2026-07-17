@@ -24,9 +24,7 @@ type artifactRecorder struct {
 
 type artifactSession struct {
 	conversationID string
-	turnSeq        int64
-	requestPayload map[string]any
-	summaryPayload map[string]any
+	requestPrefix  *requestArtifactPrefix
 }
 
 type requestArtifactPrefix struct {
@@ -57,14 +55,18 @@ func (recorder *artifactRecorder) RecordLLMRequest(requestID string, _ string, m
 	if err != nil {
 		return "", err
 	}
-	session.requestPayload = cloneStringAnyMap(payload)
-	recorder.mu.Lock()
-	recorder.sessions[artifactSessionKey(requestID, modelCallID)] = session
-	recorder.mu.Unlock()
-	if prefix, ok, err := decodeRequestPrefixPayload(session.requestPayload); err == nil && ok && prefix != nil {
+	prefix, ok, err := decodeRequestPrefixPayload(payload)
+	if err != nil {
+		return "", err
+	}
+	if ok && prefix != nil {
+		session.requestPrefix = prefix
+		recorder.mu.Lock()
+		recorder.sessions[artifactSessionKey(requestID, modelCallID)] = session
+		recorder.mu.Unlock()
 		recorder.persistLatestRequestPrefix(session.conversationID, requestID, modelCallID, prefix)
 	}
-	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_request", session.requestPayload)
+	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_request", payload)
 	return "", nil
 }
 
@@ -86,17 +88,18 @@ func (recorder *artifactRecorder) RecordLLMSummary(requestID string, _ string, m
 	if err != nil {
 		return "", err
 	}
-	session.summaryPayload = cloneStringAnyMap(payload)
-	recorder.mu.Lock()
-	recorder.sessions[artifactSessionKey(requestID, modelCallID)] = session
-	recorder.mu.Unlock()
-	if prefix, ok, err := decodeRequestPrefixPayload(session.requestPayload); err == nil && ok && prefix != nil {
-		if tokens := readInt64Value(session.summaryPayload["prompt_tokens_total"]); tokens > 0 {
+	if session.requestPrefix != nil {
+		prefix := *session.requestPrefix
+		if tokens := readInt64Value(payload["prompt_tokens_total"]); tokens > 0 {
 			prefix.PromptTokensTotal = tokens
 		}
-		recorder.persistLatestRequestPrefix(session.conversationID, requestID, modelCallID, prefix)
+		session.requestPrefix = &prefix
+		recorder.mu.Lock()
+		recorder.sessions[artifactSessionKey(requestID, modelCallID)] = session
+		recorder.mu.Unlock()
+		recorder.persistLatestRequestPrefix(session.conversationID, requestID, modelCallID, &prefix)
 	}
-	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_summary", session.summaryPayload)
+	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_summary", payload)
 	return "", nil
 }
 
@@ -147,11 +150,8 @@ func (recorder *artifactRecorder) ensureSession(requestID string, modelCallID st
 	if session, ok := recorder.sessions[key]; ok {
 		return session, nil
 	}
-	conversationID, turnSeq := recorder.resolveConversationContext(requestID)
-	session := artifactSession{
-		conversationID: conversationID,
-		turnSeq:        turnSeq,
-	}
+	conversationID := recorder.resolveConversationContext(requestID)
+	session := artifactSession{conversationID: conversationID}
 	recorder.sessions[key] = session
 	return session, nil
 }
@@ -160,17 +160,17 @@ func artifactSessionKey(requestID string, modelCallID string) string {
 	return strings.TrimSpace(requestID) + "::" + strings.TrimSpace(modelCallID)
 }
 
-func (recorder *artifactRecorder) resolveConversationContext(requestID string) (string, int64) {
+func (recorder *artifactRecorder) resolveConversationContext(requestID string) string {
 	if recorder == nil || recorder.broker == nil {
-		return "unknown", 0
+		return "unknown"
 	}
 	stream, ok := recorder.broker.Get(requestID)
 	if !ok || stream == nil {
-		return "unknown", 0
+		return "unknown"
 	}
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
-	return sanitizeArtifactName(firstNonEmpty(stream.ConversationID, "unknown")), stream.TurnSeq
+	return sanitizeArtifactName(firstNonEmpty(stream.ConversationID, "unknown"))
 }
 
 func decodeRequestPrefixPayload(payload map[string]any) (*requestArtifactPrefix, bool, error) {

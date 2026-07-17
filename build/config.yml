@@ -1,4 +1,5 @@
 version: "3"
+releaseVersion: "0.0.40-lite"
 
 # 构建元信息（修改后可执行：wails3 task common:update:build-assets）
 info:

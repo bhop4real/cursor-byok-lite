@@ -12,9 +12,12 @@ import (
 	runtimecore "cursor/internal/backend/agent/core"
 )
 
-const subscriberSignalBufferSize = 1
-const orphanSubscriberGracePeriod = 30 * time.Second
-const terminalStreamRetentionPeriod = 30 * time.Second
+const (
+	subscriberSignalBufferSize    = 1
+	streamBacklogMaxEvents        = 1024
+	orphanSubscriberGracePeriod   = 30 * time.Second
+	terminalStreamRetentionPeriod = 30 * time.Second
+)
 
 type StreamBroker struct {
 	mu      sync.RWMutex
@@ -27,6 +30,58 @@ func NewStreamBroker() *StreamBroker {
 	return &StreamBroker{
 		streams: make(map[string]*ActiveStream),
 	}
+}
+
+type streamShutdownWaiters struct {
+	ActorDone <-chan struct{}
+}
+
+// Shutdown detaches all streams, cancels active providers, and stops actor/timer retention.
+func (broker *StreamBroker) Shutdown() []streamShutdownWaiters {
+	if broker == nil {
+		return nil
+	}
+	broker.mu.Lock()
+	streams := make([]*ActiveStream, 0, len(broker.streams))
+	for _, stream := range broker.streams {
+		if stream != nil {
+			streams = append(streams, stream)
+		}
+	}
+	broker.streams = make(map[string]*ActiveStream)
+	broker.mu.Unlock()
+
+	waiters := make([]streamShutdownWaiters, 0, len(streams))
+	for _, stream := range streams {
+		stream.mu.Lock()
+		broker.stopTerminalCleanupTimerLocked(stream)
+		if stream.ProviderCancel != nil {
+			stream.ProviderCancel()
+			stream.ProviderCancel = nil
+		}
+		stream.ProviderActive = false
+		stream.ActorStopping = true
+		if stream.ActorStop != nil {
+			close(stream.ActorStop)
+			stream.ActorStop = nil
+		}
+		actorDone := stream.ActorDone
+		stream.Status = StreamStatusCanceled
+		stream.Phase = TurnPhaseCanceled
+		stream.Backlog = nil
+		stream.LatestCheckpoint = nil
+		stream.Subscribers = nil
+		stream.UpdatedAt = time.Now().UTC()
+		stream.mu.Unlock()
+		if actorDone != nil {
+			waiters = append(waiters, streamShutdownWaiters{ActorDone: actorDone})
+		}
+		if actorDone == nil {
+			clearAllStreamTimers(stream)
+			releaseTerminalStreamState(stream)
+		}
+	}
+	return waiters
 }
 
 // OpenStream 打开或复用指定 request 的活动流，并刷新其最新上下文。
@@ -91,6 +146,8 @@ func (broker *StreamBroker) OpenStream(requestID string, conversationID string, 
 		LatestUserText:              strings.TrimSpace(latestUserText),
 		Status:                      StreamStatusCreated,
 		Backlog:                     make([]StreamEvent, 0, 64),
+		BacklogFirstSequence:        1,
+		NextBacklogSequence:         1,
 		Subscribers:                 make(map[string]*StreamSubscriber),
 		PendingExecs:                make(map[string]runtimecore.PendingExec),
 		PendingInteractions:         make(map[string]runtimecore.PendingInteraction),
@@ -121,10 +178,10 @@ func (broker *StreamBroker) Get(requestID string) (*ActiveStream, bool) {
 }
 
 // Subscribe 为指定 request 注册一个新订阅者，并返回用于唤醒 backlog 消费的信号通道。
-func (broker *StreamBroker) Subscribe(requestID string) (string, <-chan struct{}, error) {
+func (broker *StreamBroker) Subscribe(requestID string) (string, <-chan struct{}, uint64, error) {
 	normalizedRequestID := strings.TrimSpace(requestID)
 	if normalizedRequestID == "" {
-		return "", nil, fmt.Errorf("request_id is required")
+		return "", nil, 0, fmt.Errorf("request_id is required")
 	}
 	stream, ok := broker.Get(normalizedRequestID)
 	if !ok || stream == nil {
@@ -133,7 +190,7 @@ func (broker *StreamBroker) Subscribe(requestID string) (string, <-chan struct{}
 		var err error
 		stream, err = broker.OpenStream(normalizedRequestID, "", 0, "", "", agentv1.AgentMode_AGENT_MODE_AGENT, "")
 		if err != nil {
-			return "", nil, err
+			return "", nil, 0, err
 		}
 	}
 	subscriberID := fmt.Sprintf("sub-%d", broker.nextID.Add(1))
@@ -141,11 +198,24 @@ func (broker *StreamBroker) Subscribe(requestID string) (string, <-chan struct{}
 
 	stream.mu.Lock()
 	broker.stopTerminalCleanupTimerLocked(stream)
+	if stream.BacklogFirstSequence == 0 {
+		stream.BacklogFirstSequence = firstBacklogSequenceLocked(stream)
+	}
+	if stream.LatestCheckpoint != nil && stream.LatestCheckpoint.Sequence > 0 {
+		subscriber.Cursor = stream.LatestCheckpoint.Sequence
+	} else if len(stream.Backlog) > 0 {
+		subscriber.Cursor = stream.BacklogFirstSequence
+	} else {
+		subscriber.Cursor = stream.NextBacklogSequence
+		if subscriber.Cursor == 0 {
+			subscriber.Cursor = 1
+		}
+	}
 	stream.Subscribers[subscriberID] = subscriber
 	stream.UpdatedAt = time.Now().UTC()
 	stream.mu.Unlock()
 
-	return subscriberID, subscriber.Signal, nil
+	return subscriberID, subscriber.Signal, subscriber.Cursor, nil
 }
 
 func (broker *StreamBroker) stopTerminalCleanupTimerLocked(stream *ActiveStream) {
@@ -171,8 +241,23 @@ func (broker *StreamBroker) Unsubscribe(requestID string, subscriberID string) i
 		delete(stream.Subscribers, strings.TrimSpace(subscriberID))
 	}
 	remaining = len(stream.Subscribers)
+	broker.compactBacklogLocked(stream)
 	stream.mu.Unlock()
 	return remaining
+}
+
+// AdvanceSubscriber 提交订阅者已消费到的下一个绝对序列号，并尝试回收安全前缀。
+func (broker *StreamBroker) AdvanceSubscriber(requestID string, subscriberID string, cursor uint64) {
+	stream, ok := broker.Get(requestID)
+	if !ok || stream == nil {
+		return
+	}
+	stream.mu.Lock()
+	if subscriber, found := stream.Subscribers[strings.TrimSpace(subscriberID)]; found && subscriber != nil && cursor > subscriber.Cursor {
+		subscriber.Cursor = cursor
+		broker.compactBacklogLocked(stream)
+	}
+	stream.mu.Unlock()
 }
 
 func (broker *StreamBroker) OtherConversationRequestIDs(conversationID string, keepRequestID string) []string {
@@ -310,7 +395,21 @@ func (broker *StreamBroker) Publish(requestID string, event StreamEvent) error {
 		stream.mu.Unlock()
 		return nil
 	}
+	if stream.NextBacklogSequence == 0 {
+		stream.NextBacklogSequence = firstBacklogSequenceLocked(stream)
+	}
+	if stream.BacklogFirstSequence == 0 {
+		stream.BacklogFirstSequence = stream.NextBacklogSequence
+	}
+	event.Sequence = stream.NextBacklogSequence
+	stream.NextBacklogSequence++
+	if isCheckpointStreamEvent(event) {
+		broker.tombstoneLatestCheckpointLocked(stream)
+		checkpoint := event
+		stream.LatestCheckpoint = &checkpoint
+	}
 	stream.Backlog = append(stream.Backlog, event)
+	broker.compactBacklogLocked(stream)
 	stream.UpdatedAt = time.Now().UTC()
 	subscribers := make([]*StreamSubscriber, 0, len(stream.Subscribers))
 	for _, subscriber := range stream.Subscribers {
@@ -330,21 +429,119 @@ func (broker *StreamBroker) Publish(requestID string, event StreamEvent) error {
 	return nil
 }
 
-// ReadFromCursor 返回从 cursor 开始尚未消费的 backlog 事件副本。
-func (broker *StreamBroker) ReadFromCursor(requestID string, cursor int) ([]StreamEvent, error) {
+func isCheckpointStreamEvent(event StreamEvent) bool {
+	if event.Message == nil || event.End {
+		return false
+	}
+	_, ok := event.Message.GetMessage().(*agentv1.AgentServerMessage_ConversationCheckpointUpdate)
+	return ok
+}
+
+func (broker *StreamBroker) tombstoneLatestCheckpointLocked(stream *ActiveStream) {
+	if stream == nil || stream.LatestCheckpoint == nil || stream.LatestCheckpoint.Sequence < stream.BacklogFirstSequence {
+		return
+	}
+	index := stream.LatestCheckpoint.Sequence - stream.BacklogFirstSequence
+	if index >= uint64(len(stream.Backlog)) {
+		return
+	}
+	retained := &stream.Backlog[int(index)]
+	if retained.Sequence == stream.LatestCheckpoint.Sequence && isCheckpointStreamEvent(*retained) {
+		retained.Message = nil
+	}
+}
+
+// ReadFromCursor 返回从绝对 cursor 开始尚未消费的 backlog 事件副本。
+func (broker *StreamBroker) ReadFromCursor(requestID string, cursor uint64) ([]StreamEvent, error) {
 	stream, ok := broker.Get(requestID)
 	if !ok || stream == nil {
 		return nil, fmt.Errorf("request is not active: %s", strings.TrimSpace(requestID))
 	}
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
-	if cursor < 0 {
-		cursor = 0
+	if cursor == 0 {
+		if stream.LatestCheckpoint != nil && stream.LatestCheckpoint.Sequence > 0 {
+			cursor = stream.LatestCheckpoint.Sequence
+		} else {
+			cursor = firstBacklogSequenceLocked(stream)
+		}
 	}
-	if cursor >= len(stream.Backlog) {
+	if cursor < stream.BacklogFirstSequence && stream.LatestCheckpoint != nil && stream.LatestCheckpoint.Sequence >= cursor {
+		checkpoint := *stream.LatestCheckpoint
+		result := []StreamEvent{checkpoint}
+		if len(stream.Backlog) > 0 && checkpoint.Sequence >= stream.BacklogFirstSequence {
+			start := checkpoint.Sequence - stream.BacklogFirstSequence + 1
+			if start < uint64(len(stream.Backlog)) {
+				result = append(result, stream.Backlog[int(start):]...)
+			}
+		} else if len(stream.Backlog) > 0 {
+			result = append(result, stream.Backlog...)
+		}
+		return result, nil
+	}
+	if len(stream.Backlog) == 0 {
 		return nil, nil
 	}
-	return append([]StreamEvent(nil), stream.Backlog[cursor:]...), nil
+	if cursor < stream.BacklogFirstSequence {
+		cursor = stream.BacklogFirstSequence
+	}
+	if cursor >= stream.NextBacklogSequence {
+		return nil, nil
+	}
+	start := cursor - stream.BacklogFirstSequence
+	if start >= uint64(len(stream.Backlog)) {
+		return nil, nil
+	}
+	return append([]StreamEvent(nil), stream.Backlog[int(start):]...), nil
+}
+
+func firstBacklogSequenceLocked(stream *ActiveStream) uint64 {
+	if stream == nil {
+		return 1
+	}
+	if len(stream.Backlog) > 0 && stream.Backlog[0].Sequence > 0 {
+		return stream.Backlog[0].Sequence
+	}
+	if stream.BacklogFirstSequence > 0 {
+		return stream.BacklogFirstSequence
+	}
+	if stream.NextBacklogSequence > 0 {
+		return stream.NextBacklogSequence
+	}
+	return 1
+}
+
+func (broker *StreamBroker) compactBacklogLocked(stream *ActiveStream) {
+	if stream == nil || len(stream.Backlog) == 0 {
+		if stream != nil && stream.NextBacklogSequence > 0 {
+			stream.BacklogFirstSequence = stream.NextBacklogSequence
+		}
+		return
+	}
+	keepFrom := 0
+	if len(stream.Subscribers) > 0 {
+		minCursor := stream.NextBacklogSequence
+		for _, subscriber := range stream.Subscribers {
+			if subscriber != nil && subscriber.Cursor < minCursor {
+				minCursor = subscriber.Cursor
+			}
+		}
+		if minCursor > stream.BacklogFirstSequence {
+			candidate := minCursor - stream.BacklogFirstSequence
+			if candidate > uint64(len(stream.Backlog)) {
+				candidate = uint64(len(stream.Backlog))
+			}
+			keepFrom = int(candidate)
+		}
+	}
+	if len(stream.Backlog)-keepFrom > streamBacklogMaxEvents {
+		keepFrom = len(stream.Backlog) - streamBacklogMaxEvents
+	}
+	if keepFrom <= 0 {
+		return
+	}
+	stream.Backlog = append([]StreamEvent(nil), stream.Backlog[keepFrom:]...)
+	stream.BacklogFirstSequence += uint64(keepFrom)
 }
 
 // Complete 把活动流标记为成功完成，并发布一个成功 endstream 事件。

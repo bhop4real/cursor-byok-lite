@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -13,12 +12,9 @@ import (
 	"cursor/internal/certs"
 	"cursor/internal/logger"
 	"cursor/internal/mitm"
-	"cursor/internal/netproxy"
 )
 
 const (
-	// publicAPITimeout 表示当前模块中的 publicAPITimeout 状态值。
-	publicAPITimeout = 15 * time.Second
 	// backendReadyTimeout 表示等待嵌入式 backend 就绪的最长时间。
 	backendReadyTimeout = 15 * time.Second
 	// backendHealthCheckInterval 表示轮询 backend 健康检查的间隔。
@@ -57,8 +53,6 @@ type ProxyService struct {
 	// caFilePath 表示当前声明中的 caFilePath。
 	caFilePath string
 
-	// publicClient 表示当前声明中的 publicClient。
-	publicClient *http.Client
 	// logsRoot 表示当前声明中的 logsRoot。
 	logsRoot string
 	// modelTestMu 保护模型测速缓存。
@@ -81,7 +75,6 @@ func NewProxyService(proxy *mitm.ProxyServer, certManager *certs.Manager, caCert
 		configPath:       resolveUserConfigPath(),
 		logsRoot:         resolveLogsRootPath(),
 		caCertPEM:        copiedCert,
-		publicClient:     netproxy.NewHTTPClient(publicAPITimeout),
 		modelTestResults: make(map[string]ModelAdapterTestResult),
 	}
 	service.store = serverconfig.NewStore(service.configPath, service.logsRoot)
@@ -136,7 +129,11 @@ func (s *ProxyService) ensureProxy(cfg serverconfig.Config) error {
 	if err != nil {
 		return err
 	}
+	previousProxy := s.proxy
 	s.proxy = proxyServer
+	if previousProxy != nil {
+		_ = previousProxy.Close(context.Background())
+	}
 	return nil
 }
 
