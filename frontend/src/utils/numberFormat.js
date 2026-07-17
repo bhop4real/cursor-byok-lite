@@ -37,3 +37,23 @@ export function formatCompactInteger(value) {
 
   return `${trimTrailingZeros(scaled.toFixed(fractionDigits))}${unit.suffix}`;
 }
+
+export function formatCompactUSD(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "$0.00";
+  }
+  if (amount > 0 && amount < 0.01) {
+    return "<$0.01";
+  }
+
+  const absAmount = Math.abs(amount);
+  const unit = COMPACT_UNITS.find(({ value: threshold }) => absAmount >= threshold);
+  if (!unit) {
+    return `$${amount.toFixed(2)}`;
+  }
+
+  const scaled = amount / unit.value;
+  const fractionDigits = Math.abs(scaled) < 10 ? 2 : Math.abs(scaled) < 100 ? 1 : 0;
+  return `$${trimTrailingZeros(scaled.toFixed(fractionDigits))}${unit.suffix}`;
+}

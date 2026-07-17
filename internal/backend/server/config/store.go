@@ -142,6 +142,9 @@ func shouldPersistNormalizedConfig(raw []byte, current Config, normalized Config
 	if current.BackendListenAddr != normalized.BackendListenAddr || current.ProxyListenAddr != normalized.ProxyListenAddr {
 		return true
 	}
+	if current.HomeMetrics.RefreshIntervalSeconds != normalized.HomeMetrics.RefreshIntervalSeconds {
+		return true
+	}
 	if current.ProviderStreamIdleTimeout == normalized.ProviderStreamIdleTimeout {
 		return false
 	}

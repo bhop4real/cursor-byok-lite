@@ -12,7 +12,7 @@ import (
 
 const (
 	usageFileName          = "usage.json"
-	usageFileSchemaVersion = 2
+	usageFileSchemaVersion = 3
 	usageRecentEventLimit  = 500
 
 	usageEventKindProvider = "provider_call"
@@ -29,6 +29,7 @@ type usageFileDocument struct {
 	UpdatedAt     time.Time                 `json:"updated_at"`
 	Totals        usageFileTotals           `json:"totals"`
 	Daily         []usageFileDaily          `json:"daily"`
+	Hourly        []usageFileHourly         `json:"hourly"`
 	RecentEvents  []usageFileEvent          `json:"recent_events"`
 	EventIndex    map[string]usageFileEvent `json:"event_index,omitempty"`
 }
@@ -47,6 +48,19 @@ type usageFileTotals struct {
 
 type usageFileDaily struct {
 	Date              string `json:"date"`
+	ProviderCalls     int64  `json:"provider_calls"`
+	TurnsTotal        int64  `json:"turns_total"`
+	ValidTurnsTotal   int64  `json:"valid_turns_total"`
+	InvalidTurnsTotal int64  `json:"invalid_turns_total"`
+	InputTokens       int64  `json:"input_tokens"`
+	OutputTokens      int64  `json:"output_tokens"`
+	CacheReadTokens   int64  `json:"cache_read_tokens"`
+	CacheWriteTokens  int64  `json:"cache_write_tokens"`
+	TotalTokens       int64  `json:"total_tokens"`
+}
+
+type usageFileHourly struct {
+	Hour              string `json:"hour"`
 	ProviderCalls     int64  `json:"provider_calls"`
 	TurnsTotal        int64  `json:"turns_total"`
 	ValidTurnsTotal   int64  `json:"valid_turns_total"`
@@ -131,6 +145,7 @@ func (store *UsageFileStore) UpsertEvent(event usageFileEvent) error {
 	applyUsageFileDelta(&doc, event.At, usageFileEventDelta(event))
 	doc.RecentEvents = upsertRecentUsageEvent(doc.RecentEvents, event)
 	doc.RecentEvents = trimRecentUsageEvents(doc.RecentEvents, usageRecentEventLimit)
+	doc.Hourly = trimUsageHourlyBuckets(doc.Hourly, time.Now().UTC().Add(-48*time.Hour))
 	doc.EventIndex = buildUsageEventIndex(doc.RecentEvents)
 	doc.SchemaVersion = usageFileSchemaVersion
 	doc.UpdatedAt = time.Now().UTC()
@@ -192,6 +207,7 @@ func readUsageFileDocument(path string) (usageFileDocument, error) {
 			return usageFileDocument{
 				SchemaVersion: usageFileSchemaVersion,
 				Daily:         make([]usageFileDaily, 0),
+				Hourly:        make([]usageFileHourly, 0),
 				RecentEvents:  make([]usageFileEvent, 0),
 				EventIndex:    make(map[string]usageFileEvent),
 			}, nil
@@ -204,6 +220,11 @@ func readUsageFileDocument(path string) (usageFileDocument, error) {
 	}
 	if doc.SchemaVersion == 0 {
 		doc.SchemaVersion = 1
+	}
+	if doc.SchemaVersion < 3 && len(doc.Hourly) == 0 {
+		for _, event := range doc.RecentEvents {
+			applyUsageHourlyDelta(&doc, event.At, usageFileEventDelta(event))
+		}
 	}
 	doc.RecentEvents = trimRecentUsageEvents(doc.RecentEvents, usageRecentEventLimit)
 	if len(doc.EventIndex) == 0 {
@@ -306,6 +327,7 @@ func applyUsageFileDelta(doc *usageFileDocument, at time.Time, delta usageFileDe
 	doc.Totals.CacheReadTokens = clampNonNegativeInt64(doc.Totals.CacheReadTokens + delta.cacheReadTokens)
 	doc.Totals.CacheWriteTokens = clampNonNegativeInt64(doc.Totals.CacheWriteTokens + delta.cacheWriteTokens)
 	doc.Totals.TotalTokens = clampNonNegativeInt64(doc.Totals.TotalTokens + delta.totalTokens)
+	applyUsageHourlyDelta(doc, at, delta)
 
 	date := at.UTC().Format("2006-01-02")
 	for index := range doc.Daily {
@@ -318,6 +340,51 @@ func applyUsageFileDelta(doc *usageFileDocument, at time.Time, delta usageFileDe
 	item := usageFileDaily{Date: date}
 	applyUsageDailyDelta(&item, delta)
 	doc.Daily = append(doc.Daily, item)
+}
+
+func applyUsageHourlyDelta(doc *usageFileDocument, at time.Time, delta usageFileDelta) {
+	if doc == nil || at.IsZero() {
+		return
+	}
+	hour := at.UTC().Truncate(time.Hour).Format(time.RFC3339)
+	for index := range doc.Hourly {
+		if doc.Hourly[index].Hour != hour {
+			continue
+		}
+		applyUsageHourlyItemDelta(&doc.Hourly[index], delta)
+		return
+	}
+	item := usageFileHourly{Hour: hour}
+	applyUsageHourlyItemDelta(&item, delta)
+	doc.Hourly = append(doc.Hourly, item)
+}
+
+func applyUsageHourlyItemDelta(item *usageFileHourly, delta usageFileDelta) {
+	if item == nil {
+		return
+	}
+	item.ProviderCalls = clampNonNegativeInt64(item.ProviderCalls + delta.providerCalls)
+	item.TurnsTotal = clampNonNegativeInt64(item.TurnsTotal + delta.turnsTotal)
+	item.ValidTurnsTotal = clampNonNegativeInt64(item.ValidTurnsTotal + delta.validTurnsTotal)
+	item.InvalidTurnsTotal = clampNonNegativeInt64(item.InvalidTurnsTotal + delta.invalidTurnsTotal)
+	item.InputTokens = clampNonNegativeInt64(item.InputTokens + delta.inputTokens)
+	item.OutputTokens = clampNonNegativeInt64(item.OutputTokens + delta.outputTokens)
+	item.CacheReadTokens = clampNonNegativeInt64(item.CacheReadTokens + delta.cacheReadTokens)
+	item.CacheWriteTokens = clampNonNegativeInt64(item.CacheWriteTokens + delta.cacheWriteTokens)
+	item.TotalTokens = clampNonNegativeInt64(item.TotalTokens + delta.totalTokens)
+}
+
+func trimUsageHourlyBuckets(items []usageFileHourly, cutoff time.Time) []usageFileHourly {
+	cutoffHour := cutoff.UTC().Truncate(time.Hour)
+	next := make([]usageFileHourly, 0, len(items))
+	for _, item := range items {
+		hour, err := time.Parse(time.RFC3339, strings.TrimSpace(item.Hour))
+		if err != nil || hour.Before(cutoffHour) {
+			continue
+		}
+		next = append(next, item)
+	}
+	return next
 }
 
 func applyUsageDailyDelta(item *usageFileDaily, delta usageFileDelta) {

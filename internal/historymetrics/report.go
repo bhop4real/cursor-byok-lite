@@ -1,15 +1,27 @@
 package historymetrics
 
+type HourlyPoint struct {
+	At                 string `json:"at"`
+	TurnsTotal         int    `json:"turnsTotal"`
+	RequestTokensTotal int64  `json:"requestTokensTotal"`
+	PromptTokensTotal  int64  `json:"promptTokensTotal"`
+	InputTokens        int64  `json:"inputTokens"`
+	OutputTokens       int64  `json:"outputTokens"`
+	CacheReadTokens    int64  `json:"cacheReadTokens"`
+	CacheWriteTokens   int64  `json:"cacheWriteTokens"`
+}
+
 type Summary struct {
-	ProviderCallsTotal int      `json:"providerCallsTotal"`
-	TurnsTotal         int      `json:"turnsTotal"`
-	ValidTurnsTotal    int      `json:"validTurnsTotal"`
-	InvalidTurnsTotal  int      `json:"invalidTurnsTotal"`
-	RequestTokensTotal int64    `json:"requestTokensTotal"`
-	PromptTokensTotal  int64    `json:"promptTokensTotal"`
-	CacheReadTokens    int64    `json:"cacheReadTokens"`
-	CacheWriteTokens   int64    `json:"cacheWriteTokens"`
-	CacheHitRate       *float64 `json:"cacheHitRate"`
+	ProviderCallsTotal int           `json:"providerCallsTotal"`
+	TurnsTotal         int           `json:"turnsTotal"`
+	ValidTurnsTotal    int           `json:"validTurnsTotal"`
+	InvalidTurnsTotal  int           `json:"invalidTurnsTotal"`
+	RequestTokensTotal int64         `json:"requestTokensTotal"`
+	PromptTokensTotal  int64         `json:"promptTokensTotal"`
+	CacheReadTokens    int64         `json:"cacheReadTokens"`
+	CacheWriteTokens   int64         `json:"cacheWriteTokens"`
+	CacheHitRate       *float64      `json:"cacheHitRate"`
+	Last24Hours        []HourlyPoint `json:"last24Hours"`
 }
 
 type Totals struct {

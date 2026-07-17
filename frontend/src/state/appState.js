@@ -47,6 +47,7 @@ const UPDATE_ERROR_EVENT = "update:error";
 const MODEL_ADAPTER_TEST_UPDATED_EVENT = "model-adapter-test:updated";
 const SUPPORTED_MODEL_ADAPTER_TEST_STATUSES = new Set(["idle", "running", "success", "error"]);
 const HOME_METRICS_MIN_LOADING_MS = 600;
+const DEFAULT_HOME_METRICS_REFRESH_INTERVAL_SECONDS = 60;
 
 export const ROUTE_MODE_OPTIONS = [
   { label: "本地服务模式", value: "local" },
@@ -508,6 +509,7 @@ function createEmptyHomeMetrics() {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     cacheHitRate: null,
+    last24Hours: [],
   };
 }
 
@@ -534,7 +536,12 @@ function loadCachedState() {
 function normalizeConfig(source) {
   const raw = source && typeof source === "object" ? source : {};
   const routing = raw.routing && typeof raw.routing === "object" ? raw.routing : {};
-  const homeMetrics = raw.homeMetrics && typeof raw.homeMetrics === "object" ? raw.homeMetrics : {};
+  const homeMetrics = raw.homeMetrics && typeof raw.homeMetrics === "object"
+    ? raw.homeMetrics
+    : {
+        includeCacheWriteInHitRate: raw.includeCacheWriteInHitRate,
+        refreshIntervalSeconds: raw.homeMetricsRefreshIntervalSeconds,
+      };
   return {
     log: asBoolean(raw.log),
     disableUpdates: asBoolean(raw.disableUpdates),
@@ -547,6 +554,8 @@ function normalizeConfig(source) {
     },
     homeMetrics: {
       includeCacheWriteInHitRate: asBoolean(homeMetrics.includeCacheWriteInHitRate),
+      refreshIntervalSeconds: asPositiveInteger(homeMetrics.refreshIntervalSeconds)
+        || DEFAULT_HOME_METRICS_REFRESH_INTERVAL_SECONDS,
     },
     lastAgentModelHash: asString(raw.lastAgentModelHash),
   };
@@ -557,6 +566,20 @@ function asNullableRate(value) {
     return value;
   }
   return null;
+}
+
+function normalizeHomeMetricsHourlyPoint(source) {
+  const raw = source && typeof source === "object" ? source : {};
+  return {
+    at: asString(raw.at),
+    turnsTotal: asPositiveInteger(raw.turnsTotal),
+    requestTokensTotal: asPositiveInteger(raw.requestTokensTotal),
+    promptTokensTotal: asPositiveInteger(raw.promptTokensTotal),
+    inputTokens: asPositiveInteger(raw.inputTokens),
+    outputTokens: asPositiveInteger(raw.outputTokens),
+    cacheReadTokens: asPositiveInteger(raw.cacheReadTokens),
+    cacheWriteTokens: asPositiveInteger(raw.cacheWriteTokens),
+  };
 }
 
 function normalizeHomeMetrics(source) {
@@ -571,6 +594,7 @@ function normalizeHomeMetrics(source) {
     cacheReadTokens: asPositiveInteger(raw.cacheReadTokens),
     cacheWriteTokens: asPositiveInteger(raw.cacheWriteTokens),
     cacheHitRate: asNullableRate(raw.cacheHitRate),
+    last24Hours: asArray(raw.last24Hours).map(normalizeHomeMetricsHourlyPoint),
   };
 }
 
@@ -606,6 +630,7 @@ function applyConfigToState(config, { modelAdaptersOnly = false } = {}) {
   appState.disableUpdates = normalized.disableUpdates;
   appState.routingMode = normalized.routing.mode;
   appState.includeCacheWriteInHitRate = normalized.homeMetrics.includeCacheWriteInHitRate;
+  appState.homeMetricsRefreshIntervalSeconds = normalized.homeMetrics.refreshIntervalSeconds;
   return normalized;
 }
 
@@ -838,6 +863,7 @@ export const appState = reactive({
   disableUpdates: cachedConfig.disableUpdates,
   routingMode: cachedConfig.routing.mode,
   includeCacheWriteInHitRate: cachedConfig.homeMetrics.includeCacheWriteInHitRate,
+  homeMetricsRefreshIntervalSeconds: cachedConfig.homeMetrics.refreshIntervalSeconds,
 
   serviceRunning: asBoolean(cachedState.serviceRunning),
   backendRunning: asBoolean(cachedState.backendRunning),

@@ -11,6 +11,7 @@ import {
   appViewState,
   openConfigWindow,
   openModelConfigWindow,
+  reloadUserConfig,
   saveRoutingMode,
   syncHomeMetrics,
   syncServiceState,
@@ -18,10 +19,37 @@ import {
   toggleService,
 } from "@/state/appState";
 
-import { computed } from "vue";
+import { computed, onUnmounted, watch } from "vue";
 
 const directModeEnabled = computed(() => appState.routingMode === "upstream");
 const message = useMessage();
+let metricsRefreshTimer = null;
+
+function resetMetricsRefreshTimer(intervalSeconds) {
+  if (metricsRefreshTimer) {
+    window.clearInterval(metricsRefreshTimer);
+  }
+  const intervalMs = Math.max(1, Number(intervalSeconds) || 60) * 1000;
+  metricsRefreshTimer = window.setInterval(async () => {
+    if (!appState.homeMetricsLoading) {
+      await reloadUserConfig().catch(() => {});
+      void syncHomeMetrics().catch(() => {});
+    }
+  }, intervalMs);
+}
+
+watch(
+  () => appState.homeMetricsRefreshIntervalSeconds,
+  resetMetricsRefreshTimer,
+  { immediate: true },
+);
+
+onUnmounted(() => {
+  if (metricsRefreshTimer) {
+    window.clearInterval(metricsRefreshTimer);
+    metricsRefreshTimer = null;
+  }
+});
 
 async function showActionError(title, error) {
   await showModal({
@@ -79,7 +107,7 @@ async function handleDirectModeChange(enabled) {
 </script>
 
 <template>
-  <div class="flex flex-col gap-4 p-4 pt-0 text-[#e5e5e5]">
+  <div class="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4 pt-0 text-[#e5e5e5]">
     <HomeMetricsCard
       :metrics="appState.homeMetrics"
       :loading="appState.homeMetricsLoading"

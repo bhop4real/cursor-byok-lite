@@ -12,12 +12,13 @@ import (
 )
 
 const (
-	DefaultBackendListenAddr                = "127.0.0.1:18090"
-	DefaultProxyListenAddr                  = "127.0.0.1:18080"
-	DefaultFrontendBaseURL                  = "http://127.0.0.1"
-	DefaultRoutingMode                      = "local"
-	DefaultProviderStreamIdleTimeoutSeconds = 240
-	MinProviderStreamIdleTimeoutSeconds     = 30
+	DefaultBackendListenAddr                 = "127.0.0.1:18090"
+	DefaultProxyListenAddr                   = "127.0.0.1:18080"
+	DefaultFrontendBaseURL                   = "http://127.0.0.1"
+	DefaultRoutingMode                       = "local"
+	DefaultProviderStreamIdleTimeoutSeconds  = 240
+	DefaultHomeMetricsRefreshIntervalSeconds = 60
+	MinProviderStreamIdleTimeoutSeconds      = 30
 )
 
 type ModelAdapterConfig struct {
@@ -49,6 +50,7 @@ type RoutingConfig struct {
 
 type HomeMetricsConfig struct {
 	IncludeCacheWriteInHitRate bool `json:"includeCacheWriteInHitRate" yaml:"includeCacheWriteInHitRate"`
+	RefreshIntervalSeconds     int  `json:"refreshIntervalSeconds" yaml:"refreshIntervalSeconds"`
 }
 
 type Config struct {
@@ -73,6 +75,9 @@ func DefaultConfig() Config {
 		Routing: RoutingConfig{
 			Mode: DefaultRoutingMode,
 		},
+		HomeMetrics: HomeMetricsConfig{
+			RefreshIntervalSeconds: DefaultHomeMetricsRefreshIntervalSeconds,
+		},
 	}
 }
 
@@ -92,6 +97,7 @@ func NormalizeConfig(input Config) (Config, error) {
 	output.BackendListenAddr = backendListenAddr
 	output.ProxyListenAddr = proxyListenAddr
 	output.HomeMetrics.IncludeCacheWriteInHitRate = input.HomeMetrics.IncludeCacheWriteInHitRate
+	output.HomeMetrics.RefreshIntervalSeconds = normalizeHomeMetricsRefreshInterval(input.HomeMetrics.RefreshIntervalSeconds)
 	output.LastAgentModelHash = strings.TrimSpace(input.LastAgentModelHash)
 	output.Routing.Mode = normalizeRoutingMode(input.Routing.Mode)
 	if output.Routing.Mode == "" {
@@ -253,6 +259,13 @@ func normalizeListenAddr(value string, defaultValue string, fieldName string) (s
 		return "", fmt.Errorf("%s port 必须在 1-65535 之间", fieldName)
 	}
 	return net.JoinHostPort(host, strconv.Itoa(parsedPort)), nil
+}
+
+func normalizeHomeMetricsRefreshInterval(value int) int {
+	if value <= 0 {
+		return DefaultHomeMetricsRefreshIntervalSeconds
+	}
+	return value
 }
 
 func normalizeProviderStreamIdleTimeout(value int) int {

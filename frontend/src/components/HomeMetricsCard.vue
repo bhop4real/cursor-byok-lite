@@ -1,9 +1,10 @@
 <script setup>
 import CacheHitRateChart from "@/components/charts/CacheHitRateChart.vue";
+import HomeMetricsTrendChart from "@/components/charts/HomeMetricsTrendChart.vue";
 import Switch from "@/components/ui/Switch.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
 import { appState, saveIncludeCacheWriteInHitRate } from "@/state/appState";
-import { formatCompactInteger, formatInteger } from "@/utils/numberFormat";
+import { formatCompactInteger, formatCompactUSD, formatInteger } from "@/utils/numberFormat";
 import { computed, ref } from "vue";
 
 const emit = defineEmits(["refresh"]);
@@ -33,7 +34,7 @@ const COST_PROFILES = [
   },
   {
     id: "gpt-5.6-sol",
-    label: "GPT-5.6-sol",
+    label: "GPT 5.6 Sol",
     prices: {
       short: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 30 },
       long: { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 45 },
@@ -41,7 +42,7 @@ const COST_PROFILES = [
   },
   {
     id: "gpt-5.6-terra",
-    label: "GPT-5.6-terra",
+    label: "GPT 5.6 Terra",
     prices: {
       short: { input: 2.5, cacheRead: 0.25, cacheWrite: 3.125, output: 15 },
       long: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 22.5 },
@@ -49,10 +50,47 @@ const COST_PROFILES = [
   },
   {
     id: "gpt-5.6-luna",
-    label: "GPT-5.6-luna",
+    label: "GPT 5.6 Luna",
     prices: {
       short: { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 6 },
       long: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 9 },
+    },
+  },
+  {
+    id: "mimo-v2.5",
+    label: "MiMo V2.5",
+    prices: {
+      standard: { input: 0.14, cacheRead: 0.0028, cacheWrite: 0.14, output: 0.28 },
+    },
+  },
+  {
+    id: "mimo-v2.5-pro",
+    label: "MiMo V2.5 Pro",
+    prices: {
+      standard: { input: 0.435, cacheRead: 0.0036, cacheWrite: 0.435, output: 0.87 },
+    },
+  },
+  {
+    id: "deepseek-v4-flash-preview",
+    label: "DeepSeek V4 Flash (Preview)",
+    note: "预览版本；缓存写入按未命中缓存输入价格估算。",
+    prices: {
+      standard: { input: 0.14, cacheRead: 0.0028, cacheWrite: 0.14, output: 0.28 },
+    },
+  },
+  {
+    id: "deepseek-v4-pro-preview",
+    label: "DeepSeek V4 Pro (Preview)",
+    note: "预览版本；缓存写入按未命中缓存输入价格估算。",
+    prices: {
+      standard: { input: 0.435, cacheRead: 0.003625, cacheWrite: 0.435, output: 0.87 },
+    },
+  },
+  {
+    id: "kimi-k3",
+    label: "Kimi K3",
+    prices: {
+      standard: { input: 3, cacheRead: 0.3, cacheWrite: 3, output: 15 },
     },
   },
 ];
@@ -309,7 +347,7 @@ async function toggleIncludeCacheWriteInHitRate(value) {
         <div
           class="center-row justify-end shrink-0 gap-2 text-xs text-[#6f6f6f]"
         >
-          <span>刷新统计</span>
+          <span>{{ appState.homeMetricsRefreshIntervalSeconds }} 秒自动刷新</span>
           <button
             type="button"
             class="center-row justify-center h-[24px] w-[24px] rounded-[6px] border border-[#3b3b3b] bg-[#242424] text-[#9d9d9d] transition-colors duration-150 hover:border-[#4c4c4c] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
@@ -421,17 +459,22 @@ async function toggleIncludeCacheWriteInHitRate(value) {
               style="font-family: var(--font-num)"
               :title="formatUSD(estimatedTokenCost.total)"
             >
-              {{ formatUSD(estimatedTokenCost.total) }}
+              {{ formatCompactUSD(estimatedTokenCost.total) }}
             </div>
             <div class="mt-3 truncate text-xs leading-5 text-[#8c8c8c]">
               缓存读写
               <span :title="formatUSD(estimatedTokenCost.cacheRead + estimatedTokenCost.cacheWrite)">
-                {{ formatUSD(estimatedTokenCost.cacheRead + estimatedTokenCost.cacheWrite) }}
+                {{ formatCompactUSD(estimatedTokenCost.cacheRead + estimatedTokenCost.cacheWrite) }}
               </span>
             </div>
           </div>
         </div>
       </div>
+
+      <HomeMetricsTrendChart
+        :points="metrics.last24Hours"
+        :prices="selectedCostPrices"
+      />
     </div>
   </div>
 </template>
