@@ -1,0 +1,88 @@
+name: Build macOS release archives
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package-macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable Yarn
+        run: corepack enable
+
+      - name: Install build tools
+        run: |
+          brew install go-task protobuf
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.74
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest
+
+      - name: Apply requested version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["RELEASE_VERSION"].strip()
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
+              raise SystemExit("version input must be an explicit semantic version without a leading v")
+
+          config_path = pathlib.Path("build/config.yml")
+          config = config_path.read_text(encoding="utf-8")
+          config, release_count = re.subn(
+              r'(?m)^releaseVersion:\s*"[^"]*"\s*$',
+              f'releaseVersion: "{version}"',
+              config,
+          )
+          numeric_version = version.split("-", 1)[0]
+          config, info_count = re.subn(
+              r'(?m)^(\s+version:)\s*"[^"]*"\s*$',
+              rf'\1 "{numeric_version}"',
+              config,
+              count=1,
+          )
+          if release_count != 1 or info_count != 1:
+              raise SystemExit("unable to update build/config.yml version fields")
+          config_path.write_text(config, encoding="utf-8")
+          PY
+
+      - name: Build macOS archives
+        run: |
+          export PATH="$(go env GOPATH)/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          task release:clean
+          task release:build:macos:arm64
+          task release:build:macos:amd64
+
+      - name: Upload macOS archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-${{ inputs.version }}
+          path: bin/release/${{ inputs.version }}/cursor-byok-${{ inputs.version }}-macos-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
