@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"cursor/internal/appdata"
 	serverconfig "cursor/internal/backend/server/config"
 	"cursor/internal/buildinfo"
+	"cursor/internal/profiler"
 
 	"github.com/leaanthony/u"
 
@@ -73,6 +75,7 @@ func Run(resources EmbeddedResources) error {
 	proxyService := bridge.NewProxyService(proxyServer, certManager, embeddedCACertPEM)
 	metricsService := bridge.NewMetricsService()
 	windowService := bridge.NewWindowService()
+	profilerService := bridge.NewProfilerService(profiler.NewManager(appdata.ProfilesRootPath()))
 	var updateManager *updater.Manager
 
 	var mainWindow *application.WebviewWindow
@@ -84,6 +87,7 @@ func Run(resources EmbeddedResources) error {
 			application.NewService(proxyService),
 			application.NewService(metricsService),
 			application.NewService(windowService),
+			application.NewService(profilerService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(resources.Assets),
@@ -95,6 +99,9 @@ func Run(resources EmbeddedResources) error {
 		OnShutdown: func() {
 			if updateManager != nil {
 				updateManager.Shutdown()
+			}
+			if err := profilerService.Shutdown(); err != nil {
+				logger.Errorf("停止性能分析失败: %v", err)
 			}
 			proxyService.ShutdownForQuit()
 			netproxy.CloseIdleConnections()

@@ -77,6 +77,9 @@ func (service *Service) bootstrapRuntimeConversation(intent InboundIntent) (*Con
 	if strings.TrimSpace(intent.SubagentTypeName) != "" {
 		conversation.SubagentTypeName = strings.TrimSpace(intent.SubagentTypeName)
 	}
+	if err := ensureConversationStartPrompt(conversation, intent.Mode, intent.ModelName); err != nil {
+		return nil, agentv1.AgentMode_AGENT_MODE_AGENT, 0, nil, err
+	}
 	if contextWindowTokens > 0 {
 		conversation.TokenDetailsMaxTokens = contextWindowTokens
 	} else if conversation.TokenDetailsMaxTokens == 0 {
@@ -131,6 +134,12 @@ func (service *Service) syncConversationRecord(conversationID string, conversati
 		item.ParentToolCallID = conversation.ParentToolCallID
 		item.SubagentTypeName = conversation.SubagentTypeName
 		item.Mode = conversation.Mode
+		if strings.TrimSpace(item.ConversationStartPromptContent) == "" && strings.TrimSpace(conversation.ConversationStartPromptContent) != "" {
+			item.ConversationStartPromptMode = strings.TrimSpace(conversation.ConversationStartPromptMode)
+			item.ConversationStartPromptPath = strings.TrimSpace(conversation.ConversationStartPromptPath)
+			item.ConversationStartPromptModel = strings.TrimSpace(conversation.ConversationStartPromptModel)
+			item.ConversationStartPromptContent = conversation.ConversationStartPromptContent
+		}
 		item.TokenDetailsUsedTokens = conversation.TokenDetailsUsedTokens
 		item.TokenDetailsMaxTokens = conversation.TokenDetailsMaxTokens
 		item.AutoCompactionPending = conversation.AutoCompactionPending

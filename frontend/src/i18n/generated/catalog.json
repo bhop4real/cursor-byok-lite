@@ -1,5 +1,17 @@
 {
   "entries": {
+    "015feae6f8e4ecb9": {
+      "source": "15 分钟",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 39,
+          "column": 12
+        }
+      ]
+    },
     "02216368edc68816": {
       "source": "无更新说明",
       "kind": "text",
@@ -7,7 +19,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1048,
+          "line": 1052,
           "column": 14
         }
       ]
@@ -38,18 +50,6 @@
           "file": "src/views/ModelEditor.vue",
           "line": 82,
           "column": 22
-        }
-      ]
-    },
-    "047ec6b71d0cec08": {
-      "source": "控制白名单主链路请求走本地服务，还是回到原始 Cursor 上游地址",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
-        {
-          "file": "src/views/Config.vue",
-          "line": 21,
-          "column": 48
         }
       ]
     },
@@ -103,18 +103,11 @@
           "file": "src/state/appState.js",
           "line": 53,
           "column": 12
-        }
-      ]
-    },
-    "0647728439b5da2e": {
-      "source": "可配置运行模式和模型渠道；运行日志位于",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
+        },
         {
           "file": "src/views/Config.vue",
-          "line": 7,
-          "column": 48
+          "line": 27,
+          "column": 12
         }
       ]
     },
@@ -243,6 +236,30 @@
         }
       ]
     },
+    "1715814541727f6d": {
+      "source": "10 分钟",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 38,
+          "column": 12
+        }
+      ]
+    },
+    "175b49b0947a2b26": {
+      "source": "打开设置目录",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 12,
+          "column": 75
+        }
+      ]
+    },
     "185aebe19c77425d": {
       "source": "{0}必须是 JSON 对象",
       "kind": "template",
@@ -262,7 +279,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1025,
+          "line": 1029,
           "column": 47
         }
       ]
@@ -332,6 +349,18 @@
         }
       ]
     },
+    "1ec634f322399b98": {
+      "source": "日志已启用",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 59,
+          "column": 12
+        }
+      ]
+    },
     "1fa7f3ccc97fdf0b": {
       "source": "长上下文",
       "kind": "text",
@@ -346,6 +375,18 @@
           "file": "src/components/HomeMetricsCard.vue",
           "line": 125,
           "column": 46
+        }
+      ]
+    },
+    "2082c8eb011a3dbf": {
+      "source": "记录后端运行事件，不影响离线性能分析。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 58,
+          "column": 12
         }
       ]
     },
@@ -378,7 +419,17 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 43,
+          "line": 209,
+          "column": 27
+        },
+        {
+          "file": "src/views/Config.vue",
+          "line": 217,
+          "column": 27
+        },
+        {
+          "file": "src/views/Config.vue",
+          "line": 225,
           "column": 27
         },
         {
@@ -429,7 +480,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1016,
+          "line": 1020,
           "column": 12
         }
       ]
@@ -443,18 +494,6 @@
           "file": "src/state/appState.js",
           "line": 472,
           "column": 14
-        }
-      ]
-    },
-    "28aeffc70ceb4267": {
-      "source": "切换当前界面显示语言，设置会立即生效并保存在本机",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
-        {
-          "file": "src/views/Config.vue",
-          "line": 50,
-          "column": 48
         }
       ]
     },
@@ -490,7 +529,7 @@
         },
         {
           "file": "src/state/appState.js",
-          "line": 1084,
+          "line": 1088,
           "column": 52
         },
         {
@@ -509,18 +548,6 @@
           "file": "src/layouts/MainLayout.vue",
           "line": 119,
           "column": 27
-        }
-      ]
-    },
-    "2d706f7981b45a7b": {
-      "source": "本地配置已保存",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
-        {
-          "file": "src/views/Config.vue",
-          "line": 35,
-          "column": 14
         }
       ]
     },
@@ -642,6 +669,18 @@
         }
       ]
     },
+    "3578859214ba8f78": {
+      "source": "采集 CPU、goroutine、heap、block、mutex 和 runtime trace；不会写入请求正文、密钥或模型输出。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 95,
+          "column": 60
+        }
+      ]
+    },
     "36c149a9b3e8dca0": {
       "source": "模型。",
       "kind": "text",
@@ -654,6 +693,18 @@
         }
       ]
     },
+    "377f4f21623b960f": {
+      "source": "Provider 流空闲超时必须是不小于 30 的整数秒数",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 145,
+          "column": 37
+        }
+      ]
+    },
     "37d23612f78a2e63": {
       "source": "立即重启更新",
       "kind": "text",
@@ -661,7 +712,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1081,
+          "line": 1085,
           "column": 45
         }
       ]
@@ -726,6 +777,11 @@
           "file": "src/state/appState.js",
           "line": 52,
           "column": 12
+        },
+        {
+          "file": "src/views/Config.vue",
+          "line": 26,
+          "column": 12
         }
       ]
     },
@@ -758,7 +814,7 @@
         },
         {
           "file": "src/views/Config.vue",
-          "line": 49,
+          "line": 70,
           "column": 57
         }
       ]
@@ -770,20 +826,8 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1046,
+          "line": 1050,
           "column": 5
-        }
-      ]
-    },
-    "3edda85621fd03b2": {
-      "source": "个模型适配器",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
-        {
-          "file": "src/views/Config.vue",
-          "line": 63,
-          "column": 53
         }
       ]
     },
@@ -883,6 +927,18 @@
         }
       ]
     },
+    "49a64a97cdbb14d1": {
+      "source": "1 分钟",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 36,
+          "column": 12
+        }
+      ]
+    },
     "4b47dbae97ba938a": {
       "source": "提示词",
       "kind": "text",
@@ -955,6 +1011,18 @@
         }
       ]
     },
+    "4febc1c15c01d8ed": {
+      "source": "采集时长",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 107,
+          "column": 16
+        }
+      ]
+    },
     "51194c3ad014fb29": {
       "source": "需重测",
       "kind": "text",
@@ -1003,6 +1071,30 @@
           "file": "src/views/ModelEditor.vue",
           "line": 148,
           "column": 22
+        }
+      ]
+    },
+    "587f8c940b8e3ca5": {
+      "source": "助手响应语言",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 77,
+          "column": 57
+        }
+      ]
+    },
+    "5924dd1d30950c23": {
+      "source": "管理运行模式、响应语言、离线性能分析和模型渠道",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Home.vue",
+          "line": 49,
+          "column": 48
         }
       ]
     },
@@ -1077,6 +1169,11 @@
       "placeholders": 0,
       "refs": [
         {
+          "file": "src/views/Config.vue",
+          "line": 124,
+          "column": 17
+        },
+        {
           "file": "src/views/ModelConfig.vue",
           "line": 40,
           "column": 12
@@ -1131,6 +1228,18 @@
         }
       ]
     },
+    "6305ba47a51d0d36": {
+      "source": "离线性能分析",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 94,
+          "column": 57
+        }
+      ]
+    },
     "6309a3bb5ba4c714": {
       "source": "保存失败",
       "kind": "text",
@@ -1148,7 +1257,12 @@
         },
         {
           "file": "src/views/Config.vue",
-          "line": 30,
+          "line": 145,
+          "column": 29
+        },
+        {
+          "file": "src/views/Config.vue",
+          "line": 170,
           "column": 27
         }
       ]
@@ -1208,7 +1322,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1014,
+          "line": 1018,
           "column": 14
         }
       ]
@@ -1319,12 +1433,12 @@
         },
         {
           "file": "src/views/Config.vue",
-          "line": 23,
+          "line": 119,
           "column": 30
         },
         {
           "file": "src/views/Config.vue",
-          "line": 23,
+          "line": 119,
           "column": 48
         },
         {
@@ -1378,18 +1492,6 @@
         }
       ]
     },
-    "6e584e3d5ce64aa0": {
-      "source": "保存配置",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
-        {
-          "file": "src/views/Config.vue",
-          "line": 12,
-          "column": 15
-        }
-      ]
-    },
     "6e86570183c3cdd0": {
       "source": "当前已是最新版本",
       "kind": "text",
@@ -1397,7 +1499,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1031,
+          "line": 1035,
           "column": 20
         }
       ]
@@ -1479,6 +1581,18 @@
         }
       ]
     },
+    "77710aedc74ecfa3": {
+      "source": "日本語",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 33,
+          "column": 12
+        }
+      ]
+    },
     "77c9e582e85583af": {
       "source": "测试失败",
       "kind": "text",
@@ -1547,7 +1661,7 @@
       "refs": [
         {
           "file": "src/router/index.js",
-          "line": 22,
+          "line": 28,
           "column": 39
         }
       ]
@@ -1588,7 +1702,7 @@
         },
         {
           "file": "src/state/appState.js",
-          "line": 1067,
+          "line": 1071,
           "column": 16
         }
       ]
@@ -1651,6 +1765,18 @@
         }
       ]
     },
+    "81e854e609874050": {
+      "source": "自动跟随当前请求",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 30,
+          "column": 12
+        }
+      ]
+    },
     "8672864e90417138": {
       "source": "最高",
       "kind": "text",
@@ -1675,7 +1801,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1011,
+          "line": 1015,
           "column": 14
         }
       ]
@@ -1687,7 +1813,7 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 20,
+          "line": 24,
           "column": 57
         }
       ]
@@ -1752,13 +1878,8 @@
         },
         {
           "file": "src/router/index.js",
-          "line": 17,
+          "line": 23,
           "column": 39
-        },
-        {
-          "file": "src/views/Config.vue",
-          "line": 61,
-          "column": 57
         },
         {
           "file": "src/views/Home.vue",
@@ -1776,6 +1897,18 @@
           "file": "src/components/HomeMetricsCard.vue",
           "line": 276,
           "column": 5
+        }
+      ]
+    },
+    "8d77406d95bca83a": {
+      "source": "模型渠道",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 146,
+          "column": 55
         }
       ]
     },
@@ -1822,7 +1955,7 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 66,
+          "line": 149,
           "column": 67
         }
       ]
@@ -1846,8 +1979,8 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 12,
-          "column": 15
+          "line": 14,
+          "column": 17
         },
         {
           "file": "src/views/ModelEditor.vue",
@@ -1892,6 +2025,18 @@
         }
       ]
     },
+    "93d8e58ced1cd70b": {
+      "source": "保存后下次启动生效。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 49,
+          "column": 12
+        }
+      ]
+    },
     "93e08803675e378b": {
       "source": "模型标识",
       "kind": "text",
@@ -1918,6 +2063,42 @@
           "file": "src/layouts/MainLayout.vue",
           "line": 86,
           "column": 44
+        }
+      ]
+    },
+    "949daa180e1ee60a": {
+      "source": "加载设置失败",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 238,
+          "column": 27
+        }
+      ]
+    },
+    "9553bbfd89813e2a": {
+      "source": "个模型适配器。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 147,
+          "column": 97
+        }
+      ]
+    },
+    "95e26588e67a8113": {
+      "source": "控制请求使用本地模型渠道或原始 Cursor 上游。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 25,
+          "column": 60
         }
       ]
     },
@@ -1957,13 +2138,25 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1329,
+          "line": 1333,
           "column": 32
         },
         {
           "file": "src/state/appState.js",
-          "line": 1350,
+          "line": 1354,
           "column": 32
+        }
+      ]
+    },
+    "9937e365aaf3a085": {
+      "source": "简体中文",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 32,
+          "column": 12
         }
       ]
     },
@@ -2003,6 +2196,18 @@
         }
       ]
     },
+    "9c2a5dd39e5886fc": {
+      "source": "本地配置已保存，响应语言会从下一次模型请求开始生效。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 166,
+          "column": 16
+        }
+      ]
+    },
     "9c38b6e9bf94abec": {
       "source": "已切换到直连 Cursor 模式",
       "kind": "text",
@@ -2039,7 +2244,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1084,
+          "line": 1088,
           "column": 45
         }
       ]
@@ -2052,6 +2257,18 @@
         {
           "file": "src/components/ModelAdapterModal.vue",
           "line": 40,
+          "column": 12
+        }
+      ]
+    },
+    "9d9a5e5793d145d8": {
+      "source": "5 分钟",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 37,
           "column": 12
         }
       ]
@@ -2135,13 +2352,25 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1034,
+          "line": 1038,
           "column": 12
         },
         {
           "file": "src/state/appState.js",
-          "line": 1077,
+          "line": 1081,
           "column": 87
+        }
+      ]
+    },
+    "a2fb80c4cb56d197": {
+      "source": "日志已关闭",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 60,
+          "column": 12
         }
       ]
     },
@@ -2169,7 +2398,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1274,
+          "line": 1278,
           "column": 14
         },
         {
@@ -2334,20 +2563,8 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1063,
+          "line": 1067,
           "column": 16
-        }
-      ]
-    },
-    "ad79540418be700a": {
-      "source": "打开设置目录，或单独管理模型配置",
-      "kind": "text",
-      "placeholders": 0,
-      "refs": [
-        {
-          "file": "src/views/Home.vue",
-          "line": 49,
-          "column": 48
         }
       ]
     },
@@ -2450,6 +2667,18 @@
         }
       ]
     },
+    "b746c4c29aa7dcdb": {
+      "source": "打开分析目录",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 126,
+          "column": 100
+        }
+      ]
+    },
     "b765005f69fa971f": {
       "source": "例如：gpt-4.1",
       "kind": "text",
@@ -2503,6 +2732,18 @@
         }
       ]
     },
+    "b920ca57720ca771": {
+      "source": "正在采集",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 69,
+          "column": 12
+        }
+      ]
+    },
     "ba3c66f90fd11725": {
       "source": "已识别系统代理",
       "kind": "text",
@@ -2541,6 +2782,18 @@
           "file": "src/views/ModelEditor.vue",
           "line": 95,
           "column": 22
+        }
+      ]
+    },
+    "bb1d19b85634606e": {
+      "source": "诊断日志",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 57,
+          "column": 12
         }
       ]
     },
@@ -2592,6 +2845,18 @@
         }
       ]
     },
+    "bf77cfdc6ca09596": {
+      "source": "停止性能分析失败",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 199,
+          "column": 27
+        }
+      ]
+    },
     "c228558cf257fc49": {
       "source": "删除失败",
       "kind": "text",
@@ -2616,8 +2881,8 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 29,
-          "column": 14
+          "line": 27,
+          "column": 96
         }
       ]
     },
@@ -2645,15 +2910,15 @@
         }
       ]
     },
-    "c69f5bce63b9f14c": {
-      "source": "设置文件夹",
+    "c8550237ba701f64": {
+      "source": "保存设置",
       "kind": "text",
       "placeholders": 0,
       "refs": [
         {
-          "file": "src/views/Home.vue",
-          "line": 52,
-          "column": 64
+          "file": "src/views/Config.vue",
+          "line": 14,
+          "column": 17
         }
       ]
     },
@@ -2681,17 +2946,17 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1245,
+          "line": 1249,
           "column": 28
         },
         {
           "file": "src/state/appState.js",
-          "line": 1247,
+          "line": 1251,
           "column": 38
         },
         {
           "file": "src/state/appState.js",
-          "line": 1282,
+          "line": 1286,
           "column": 93
         }
       ]
@@ -2715,8 +2980,13 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1023,
+          "line": 1027,
           "column": 51
+        },
+        {
+          "file": "src/views/Config.vue",
+          "line": 116,
+          "column": 17
         }
       ]
     },
@@ -2729,6 +2999,18 @@
           "file": "src/components/HomeMetricsCard.vue",
           "line": 275,
           "column": 5
+        }
+      ]
+    },
+    "cbbcf84eced779d5": {
+      "source": "已到时自动停止",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 72,
+          "column": 41
         }
       ]
     },
@@ -2753,6 +3035,18 @@
           "file": "src/views/Home.vue",
           "line": 34,
           "column": 12
+        }
+      ]
+    },
+    "ceb0a425f3bd6c8a": {
+      "source": "Provider 流空闲超时",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 31,
+          "column": 57
         }
       ]
     },
@@ -2816,6 +3110,18 @@
         }
       ]
     },
+    "d2e3f250f57cc5e8": {
+      "source": "独立于界面语言；自动模式只检测当前用户请求。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 78,
+          "column": 60
+        }
+      ]
+    },
     "d3209b935ae86797": {
       "source": "模型配置不存在，无法删除",
       "kind": "text",
@@ -2823,7 +3129,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1226,
+          "line": 1230,
           "column": 14
         },
         {
@@ -2859,6 +3165,18 @@
           "file": "src/state/appState.js",
           "line": 248,
           "column": 50
+        }
+      ]
+    },
+    "d40b923dbc6a6b59": {
+      "source": "配置保存到",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 7,
+          "column": 48
         }
       ]
     },
@@ -2990,8 +3308,20 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1045,
+          "line": 1049,
           "column": 5
+        }
+      ]
+    },
+    "dcf59b082865b3cb": {
+      "source": "停止并保存",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 124,
+          "column": 17
         }
       ]
     },
@@ -3002,8 +3332,25 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 62,
-          "column": 48
+          "line": 147,
+          "column": 58
+        }
+      ]
+    },
+    "df3d58c7d84b85f2": {
+      "source": "设置",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/router/index.js",
+          "line": 18,
+          "column": 39
+        },
+        {
+          "file": "src/views/Home.vue",
+          "line": 52,
+          "column": 64
         }
       ]
     },
@@ -3016,6 +3363,18 @@
           "file": "src/views/ModelEditor.vue",
           "line": 135,
           "column": 22
+        }
+      ]
+    },
+    "e04213ac62294903": {
+      "source": "分析文件目录",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 134,
+          "column": 77
         }
       ]
     },
@@ -3048,11 +3407,6 @@
       "kind": "text",
       "placeholders": 0,
       "refs": [
-        {
-          "file": "src/views/Config.vue",
-          "line": 6,
-          "column": 57
-        },
         {
           "file": "src/views/Home.vue",
           "line": 48,
@@ -3120,6 +3474,18 @@
         }
       ]
     },
+    "ebbc4c1dad2036bc": {
+      "source": "启动性能分析失败",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 185,
+          "column": 27
+        }
+      ]
+    },
     "ec3b17a75db49e24": {
       "source": "{0} t/s | 首字 {1}",
       "kind": "template",
@@ -3139,7 +3505,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1065,
+          "line": 1069,
           "column": 16
         }
       ]
@@ -3163,8 +3529,32 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 38,
-          "column": 10
+          "line": 48,
+          "column": 12
+        }
+      ]
+    },
+    "f006455e3baf2b0b": {
+      "source": "已停止",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 72,
+          "column": 53
+        }
+      ]
+    },
+    "f0975eae2a72ab12": {
+      "source": "只影响配置界面，切换后立即生效。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 71,
+          "column": 60
         }
       ]
     },
@@ -3189,6 +3579,18 @@
           "file": "src/views/ModelEditor.vue",
           "line": 140,
           "column": 16
+        }
+      ]
+    },
+    "f2881273ca144643": {
+      "source": "超过该时间没有有效内容时终止请求，最小 30 秒。",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 32,
+          "column": 60
         }
       ]
     },
@@ -3235,7 +3637,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1025,
+          "line": 1029,
           "column": 38
         }
       ]
@@ -3247,8 +3649,8 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 40,
-          "column": 10
+          "line": 50,
+          "column": 12
         }
       ]
     },
@@ -3316,8 +3718,8 @@
         },
         {
           "file": "src/views/Config.vue",
-          "line": 34,
-          "column": 12
+          "line": 165,
+          "column": 14
         }
       ]
     },
@@ -3338,6 +3740,18 @@
         }
       ]
     },
+    "f6e0d6919f8e55de": {
+      "source": "未开始",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 74,
+          "column": 10
+        }
+      ]
+    },
     "f6e1c8b1a6970db5": {
       "source": "当前出站请求未使用系统代理",
       "kind": "text",
@@ -3347,6 +3761,18 @@
           "file": "src/layouts/MainLayout.vue",
           "line": 59,
           "column": 10
+        }
+      ]
+    },
+    "f96d5b27889bb656": {
+      "source": "选择响应语言",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 84,
+          "column": 14
         }
       ]
     },
@@ -3394,7 +3820,7 @@
         },
         {
           "file": "src/state/appState.js",
-          "line": 1081,
+          "line": 1085,
           "column": 56
         }
       ]
@@ -3406,7 +3832,7 @@
       "refs": [
         {
           "file": "src/state/appState.js",
-          "line": 1023,
+          "line": 1027,
           "column": 40
         }
       ]
@@ -3418,20 +3844,20 @@
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 41,
-          "column": 10
+          "line": 51,
+          "column": 12
         }
       ]
     },
-    "fdf245a19a53883f": {
-      "source": "保存后下次启动生效；启用后不会自动检查或下载更新。",
+    "fe192b65d0e429ea": {
+      "source": "开始采集",
       "kind": "text",
       "placeholders": 0,
       "refs": [
         {
           "file": "src/views/Config.vue",
-          "line": 39,
-          "column": 10
+          "line": 116,
+          "column": 17
         }
       ]
     },
@@ -3444,6 +3870,18 @@
           "file": "src/layouts/MainLayout.vue",
           "line": 67,
           "column": 16
+        }
+      ]
+    },
+    "ff607813b73bd81d": {
+      "source": "本地设置",
+      "kind": "text",
+      "placeholders": 0,
+      "refs": [
+        {
+          "file": "src/views/Config.vue",
+          "line": 6,
+          "column": 57
         }
       ]
     }

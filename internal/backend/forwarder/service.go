@@ -25,6 +25,7 @@ import (
 	runtimecore "cursor/internal/backend/agent/core"
 	modeladapter "cursor/internal/backend/agent/model"
 	protocol "cursor/internal/backend/agent/protocol"
+	"cursor/internal/profiler"
 )
 
 const (
@@ -282,6 +283,10 @@ func NewService(historyRoot string, resolver modeladapter.ChannelResolver) *Serv
 	if candidate, ok := resolver.(agentModelMemory); ok {
 		modelMemory = candidate
 	}
+	var responseLanguage ResponseLanguageSource
+	if candidate, ok := resolver.(ResponseLanguageSource); ok {
+		responseLanguage = candidate
+	}
 	var debugConfig debugLogConfig
 	if candidate, ok := resolver.(debugLogConfig); ok {
 		debugConfig = candidate
@@ -294,7 +299,7 @@ func NewService(historyRoot string, resolver modeladapter.ChannelResolver) *Serv
 		docsIndexStore:     NewDocsIndexStore(appdata.DocsIndexRootPath()),
 		rules:              rules,
 		projector:          projector,
-		compiler:           NewPromptCompiler(projector, NewToolCatalog(), NewReminderInjector(), rules),
+		compiler:           NewPromptCompiler(projector, NewToolCatalog(), NewReminderInjector(), rules, responseLanguage),
 		provider:           NewProviderGateway(resolver),
 		resolver:           resolver,
 		modelMemory:        modelMemory,
@@ -368,6 +373,8 @@ func (service *Service) BidiAppend(ctx context.Context, req *connect.Request[ais
 	if requestID == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("request_id is required"))
 	}
+	ctx, restoreProfileLabels := profiler.Region(ctx, "forwarder.bidi_append", requestID)
+	defer restoreProfileLabels()
 	appendSeqno := req.Msg.GetAppendSeqno()
 	dataHex := req.Msg.GetData()
 	appendTicket, staleAppend, err := service.appendSeq.Acquire(ctx, requestID, appendSeqno)
@@ -451,6 +458,8 @@ func (service *Service) RunSSE(ctx context.Context, req *connect.Request[aiserve
 	if requestID == "" {
 		return buildRunSSECustomError(connect.CodeInvalidArgument, "请求参数无效", fmt.Errorf("request_id is required"))
 	}
+	ctx, restoreProfileLabels := profiler.Region(ctx, "forwarder.run_sse", requestID)
+	defer restoreProfileLabels()
 	subscriberID, signal, cursor, err := service.broker.Subscribe(requestID)
 	if err != nil {
 		return buildRunSSECustomError(connect.CodeInvalidArgument, "请求参数无效", err)
@@ -1356,6 +1365,8 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 	latestUserText := stream.LatestUserText
 	stream.UpdatedAt = time.Now().UTC()
 	stream.mu.Unlock()
+	profileContext, restoreProfileLabels := profiler.Region(context.Background(), "forwarder.provider_drive", requestID)
+	defer restoreProfileLabels()
 	log.Printf("forwarder provider pass started request_id=%s model_call_id=%s provider_pass=%d", strings.TrimSpace(requestID), strings.TrimSpace(modelCallID), currentPass)
 
 	conversation, _, _, err := service.snapshotCheckpointConversation(stream)
@@ -1414,7 +1425,7 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 	}
 	maxTokens, requestKnobs := service.resolveProviderOutputBudget(modelID, conversation, compiled)
 	service.maybeSaveLastAgentModelHash(conversation, modelID, mode, currentPass)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(profileContext)
 	stream.mu.Lock()
 	stream.ProviderActive = true
 	stream.ProviderCancel = cancel
@@ -1984,7 +1995,7 @@ func (service *Service) appendToolResult(stream *ActiveStream, toolCallID string
 
 func shouldPersistStructuredToolResult(toolName string) bool {
 	switch strings.TrimSpace(toolName) {
-	case "CreatePlan", "TodoWrite":
+	case "AskQuestion", "CreatePlan", "TodoWrite":
 		return true
 	default:
 		return false

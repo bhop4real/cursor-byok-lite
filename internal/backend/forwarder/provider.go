@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	modeladapter "cursor/internal/backend/agent/model"
+	"cursor/internal/profiler"
 )
 
 type activeArtifactCleaner interface {
@@ -44,9 +45,8 @@ func (service *Service) rawProviderObserver(ctx context.Context) modeladapter.LL
 
 // StartStream 把 forwarder 的 provider 请求翻译成 modeladapter.StreamRequest 并发起流式调用。
 func (gateway *DefaultProviderGateway) StartStream(ctx context.Context, req ProviderRequest, sink func(modeladapter.ModelEvent) error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, restoreProfileLabels := profiler.Region(ctx, "forwarder.provider_gateway", req.RequestID)
+	defer restoreProfileLabels()
 	if cleaner, ok := req.Observer.(activeArtifactCleaner); ok {
 		defer cleaner.ClearActiveArtifacts(req.RequestID, req.ModelCallID)
 	}

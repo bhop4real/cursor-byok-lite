@@ -25,6 +25,7 @@ type modelEditorContext struct {
 type WindowService struct {
 	app               *application.App
 	updater           *updater.Manager
+	configWindow      *application.WebviewWindow
 	modelConfigWindow *application.WebviewWindow
 	modelEditorWindow *application.WebviewWindow
 	editorCtx         *modelEditorContext
@@ -77,8 +78,66 @@ func (s *WindowService) InstallReadyUpdate() error {
 	return manager.InstallReadyUpdate()
 }
 
-// OpenConfigWindow 打开本地设置目录。
+// OpenConfigWindow 打开设置窗口。如果窗口已存在则聚焦。
 func (s *WindowService) OpenConfigWindow() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.app == nil {
+		return
+	}
+	if s.configWindow != nil {
+		s.configWindow.Show()
+		s.configWindow.Focus()
+		return
+	}
+
+	win := s.app.Window.NewWithOptions(application.WebviewWindowOptions{
+		Title:               "设置",
+		Width:               820,
+		Height:              680,
+		MinWidth:            700,
+		MinHeight:           560,
+		DisableResize:       false,
+		Frameless:           goruntime.GOOS == "windows",
+		URL:                 "/#/config",
+		Hidden:              false,
+		HideOnEscape:        false,
+		MinimiseButtonState: application.ButtonEnabled,
+		MaximiseButtonState: application.ButtonEnabled,
+		CloseButtonState:    application.ButtonEnabled,
+		BackgroundColour:    application.RGBA{Red: 25, Green: 25, Blue: 25, Alpha: 255},
+		Mac: application.MacWindow{
+			Backdrop:      application.MacBackdropLiquidGlass,
+			DisableShadow: false,
+			TitleBar: application.MacTitleBar{
+				AppearsTransparent:   true,
+				Hide:                 false,
+				HideTitle:            true,
+				FullSizeContent:      true,
+				UseToolbar:           false,
+				HideToolbarSeparator: true,
+			},
+			WebviewPreferences: application.MacWebviewPreferences{
+				FullscreenEnabled:                   u.True,
+				TextInteractionEnabled:              u.True,
+				AllowsBackForwardNavigationGestures: u.False,
+			},
+		},
+		Windows: application.WindowsWindow{
+			HiddenOnTaskbar: false,
+		},
+	})
+	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.configWindow = nil
+	})
+	s.configWindow = win
+}
+
+// OpenSettingsDirectory 打开本地设置目录。
+func (s *WindowService) OpenSettingsDirectory() {
 	_ = os.MkdirAll(client.ResolveSettingsRootPath(), 0o755)
 	openDirectory(client.ResolveSettingsRootPath())
 }

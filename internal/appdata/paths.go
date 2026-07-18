@@ -57,6 +57,11 @@ func RulesRootPath() string {
 	return filepath.Join(RootDir(), "rules")
 }
 
+// ProfilesRootPath 返回离线性能分析工件目录。
+func ProfilesRootPath() string {
+	return filepath.Join(RootDir(), "profiles")
+}
+
 // LogsRootPath 返回统一日志根目录路径。
 func LogsRootPath() string {
 	return filepath.Join(RootDir(), "logs")

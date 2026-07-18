@@ -383,6 +383,7 @@ func (service *Service) runPendingCompaction(stream *ActiveStream, token uint64,
 		} else {
 			summaryText = buildFallbackCompactionSummary(plan)
 		}
+		summaryText = composeConversationStartPromptSummary(conversationStartPromptFromStream(stream), summaryText)
 	}
 	if postErr := service.postStreamCommandWait(stream, streamCommand{
 		Kind: streamCommandCompactionEvent,

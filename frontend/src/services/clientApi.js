@@ -124,3 +124,36 @@ export function getModelAdapterTestResults() {
     Call.ByName(`${PROXY_SERVICE_NAME}.GetModelAdapterTestResults`),
   );
 }
+
+const WINDOW_SERVICE_NAME = "cursor/internal/bridge.WindowService";
+const PROFILER_SERVICE_NAME = "cursor/internal/bridge.ProfilerService";
+
+export function openSettingsDirectory() {
+  return withApiLogging("OpenSettingsDirectory", undefined, () =>
+    Call.ByName(`${WINDOW_SERVICE_NAME}.OpenSettingsDirectory`),
+  );
+}
+
+export function getProfilerStatus() {
+  return withApiLogging("GetProfilerStatus", undefined, () =>
+    Call.ByName(`${PROFILER_SERVICE_NAME}.GetProfilerStatus`),
+  );
+}
+
+export function startProfiling(traceLimitSeconds) {
+  return withApiLogging("StartProfiling", { traceLimitSeconds }, () =>
+    Call.ByName(`${PROFILER_SERVICE_NAME}.StartProfiling`, traceLimitSeconds),
+  );
+}
+
+export function stopProfiling() {
+  return withApiLogging("StopProfiling", undefined, () =>
+    Call.ByName(`${PROFILER_SERVICE_NAME}.StopProfiling`),
+  );
+}
+
+export function openProfilerDirectory() {
+  return withApiLogging("OpenProfilerDirectory", undefined, () =>
+    Call.ByName(`${PROFILER_SERVICE_NAME}.OpenProfilerDirectory`),
+  );
+}

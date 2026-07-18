@@ -23,6 +23,10 @@ type ConversationFile struct {
 	ParentToolCallID                string                                `json:"parent_tool_call_id"`
 	SubagentTypeName                string                                `json:"subagent_type_name,omitempty"`
 	Mode                            string                                `json:"mode"`
+	ConversationStartPromptMode     string                                `json:"conversation_start_prompt_mode,omitempty"`
+	ConversationStartPromptPath     string                                `json:"conversation_start_prompt_path,omitempty"`
+	ConversationStartPromptModel    string                                `json:"conversation_start_prompt_model,omitempty"`
+	ConversationStartPromptContent  string                                `json:"conversation_start_prompt_content,omitempty"`
 	ContextVersion                  int64                                 `json:"context_version,omitempty"`
 	CurrentLoopID                   string                                `json:"current_loop_id,omitempty"`
 	CurrentLoopStatus               string                                `json:"current_loop_status,omitempty"`

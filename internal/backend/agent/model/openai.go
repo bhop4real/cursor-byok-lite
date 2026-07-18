@@ -16,6 +16,7 @@ import (
 	runtimecore "cursor/internal/backend/agent/core"
 	"cursor/internal/modelchannel"
 	"cursor/internal/netproxy"
+	"cursor/internal/profiler"
 )
 
 // OpenAIAdapter 实现 OpenAI 兼容流式请求。
@@ -387,6 +388,8 @@ func ProviderURLHasEndpoint(baseURL string, endpoints ...string) bool {
 
 // Stream 发送 OpenAI 兼容流式请求，并解析统一模型事件。
 func (adapter *OpenAIAdapter) Stream(ctx context.Context, req StreamRequest, sink func(ModelEvent) error) error {
+	ctx, restoreProfileLabels := profiler.Region(ctx, "provider.openai", req.RequestID)
+	defer restoreProfileLabels()
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	if baseURL == "" {
 		return fmt.Errorf("openai base url is empty")

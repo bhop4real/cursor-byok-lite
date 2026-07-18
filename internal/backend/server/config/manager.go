@@ -106,6 +106,13 @@ func (manager *Manager) SaveLastAgentModelHash(ctx context.Context, value string
 	return err
 }
 
+func (manager *Manager) ResponseLanguage() string {
+	if manager == nil {
+		return DefaultResponseLanguage
+	}
+	return normalizeResponseLanguage(manager.Current().ResponseLanguage)
+}
+
 func (manager *Manager) ProviderStreamIdleTimeout(ctx context.Context) time.Duration {
 	if manager == nil {
 		return time.Duration(DefaultProviderStreamIdleTimeoutSeconds) * time.Second

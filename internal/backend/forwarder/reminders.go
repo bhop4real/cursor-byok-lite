@@ -92,30 +92,6 @@ func (injector *DefaultReminderInjector) Inject(mode agentv1.AgentMode, conversa
 		return appendCurrentTurnAttentionReminders(result, latestUserText)
 	}
 
-	candidate, ok := extractLatestSuccessfulEditReminder(replayMessages)
-	if !ok {
-		return appendCurrentTurnAttentionReminders(result, latestUserText)
-	}
-	result.PromptContexts = append(result.PromptContexts, newPromptContextMessage(
-		"latest_edit_reminder",
-		modeladapter.Message{
-			Role: "user",
-			Content: strings.TrimSpace(fmt.Sprintf(`<system_reminder>
-You recently successfully edited %q.
-
-For this file, the latest source of truth is the most recent successful %s, not earlier reads or memory.
-
-When modifying this file:
-- use PatchEdit with path, old_string, new_string, and optional replace_all
-- copy old_string exactly from the latest file content; line endings are not normalized or treated equivalently during matching
-- replace_all defaults to false, so old_string must match exactly one occurrence unless you intentionally set replace_all to true
-- new_string may be empty to delete old_string
-- preserve spaces, tabs, indentation, punctuation, and line endings exactly in old_string
-- only read the file again yourself if you need exact current content or extra context to choose a unique old_string
-</system_reminder>`, candidate.Path, candidate.SourceField)),
-		},
-		false,
-	))
 	return appendCurrentTurnAttentionReminders(result, latestUserText)
 }
 

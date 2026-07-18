@@ -18,6 +18,7 @@ import (
 	"cursor/gen/agentv1"
 	runtimecore "cursor/internal/backend/agent/core"
 	"cursor/internal/netproxy"
+	"cursor/internal/profiler"
 )
 
 // AnthropicAdapter 实现 Anthropic 兼容流式请求。
@@ -214,6 +215,8 @@ func anthropicProviderSystemBlocks(systemParts []string) []map[string]any {
 
 // Stream 发送 Messages 流式请求，并解析统一模型事件。
 func (adapter *AnthropicAdapter) Stream(ctx context.Context, req StreamRequest, sink func(ModelEvent) error) error {
+	ctx, restoreProfileLabels := profiler.Region(ctx, "provider.anthropic", req.RequestID)
+	defer restoreProfileLabels()
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	if baseURL == "" {
 		return fmt.Errorf("anthropic base url is empty")

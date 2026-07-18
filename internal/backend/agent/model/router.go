@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"cursor/internal/profiler"
 	legacyruntime "cursor/internal/runtime"
 )
 
@@ -51,6 +52,8 @@ func (router *Router) Close() {
 
 // Stream 根据模型标识选择具体 provider 并转发请求。
 func (router *Router) Stream(ctx context.Context, req StreamRequest, sink func(ModelEvent) error) error {
+	ctx, restoreProfileLabels := profiler.Region(ctx, "model.router", req.RequestID)
+	defer restoreProfileLabels()
 	if router == nil || router.resolver == nil {
 		return fmt.Errorf("model adapter resolver is unavailable")
 	}

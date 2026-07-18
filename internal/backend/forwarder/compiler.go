@@ -4,6 +4,7 @@ package forwarder
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"cursor/gen/agentv1"
 	modeladapter "cursor/internal/backend/agent/model"
@@ -19,20 +20,30 @@ type replayPromptCompiler interface {
 	CompileWithReplay(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string, replayMessages []modeladapter.Message) (CompiledConversation, error)
 }
 
+type ResponseLanguageSource interface {
+	ResponseLanguage() string
+}
+
 type DefaultPromptCompiler struct {
-	projector *HistoryProjector
-	catalog   ToolCatalog
-	reminders ReminderInjector
-	rules     *UserRuleStore
+	projector        *HistoryProjector
+	catalog          ToolCatalog
+	reminders        ReminderInjector
+	rules            *UserRuleStore
+	responseLanguage ResponseLanguageSource
 }
 
 // NewPromptCompiler 创建默认 prompt 编译器。
-func NewPromptCompiler(projector *HistoryProjector, catalog ToolCatalog, reminders ReminderInjector, rules *UserRuleStore) *DefaultPromptCompiler {
+func NewPromptCompiler(projector *HistoryProjector, catalog ToolCatalog, reminders ReminderInjector, rules *UserRuleStore, responseLanguage ...ResponseLanguageSource) *DefaultPromptCompiler {
+	var source ResponseLanguageSource
+	if len(responseLanguage) > 0 {
+		source = responseLanguage[0]
+	}
 	return &DefaultPromptCompiler{
-		projector: projector,
-		catalog:   catalog,
-		reminders: reminders,
-		rules:     rules,
+		projector:        projector,
+		catalog:          catalog,
+		reminders:        reminders,
+		rules:            rules,
+		responseLanguage: source,
 	}
 }
 
@@ -82,7 +93,8 @@ func (compiler *DefaultPromptCompiler) CompileWithReplay(conversation *Conversat
 			return CompiledConversation{}, err
 		}
 	}
-	messages := make([]modeladapter.Message, 0, len(replayMessages)+1)
+	responseLanguage := resolveResponseLanguage(compiler.configuredResponseLanguage(), latestUserText)
+	messages := make([]modeladapter.Message, 0, len(replayMessages)+2)
 	systemParts := []string{sanitizePromptAsset(systemPrompt, modelName)}
 	if strings.TrimSpace(sharedRulesPrompt) != "" {
 		systemParts = append(systemParts, sharedRulesPrompt)
@@ -99,13 +111,74 @@ func (compiler *DefaultPromptCompiler) CompileWithReplay(conversation *Conversat
 		return CompiledConversation{}, err
 	}
 	messages = append(messages, replayMessages...)
+	messages = append(messages, modeladapter.Message{
+		Role:    "user",
+		Content: responseLanguageInstruction(responseLanguage),
+	})
+	messages = append(messages, modeladapter.Message{
+		Role:    "user",
+		Content: currentPassExecutionContract(conversation, replayMessages),
+	})
 	return CompiledConversation{
 		Mode:               normalizedMode,
 		Messages:           messages,
 		StableMessageCount: stableReplayCount,
 		Tools:              tools,
-		CompileSummary:     fmt.Sprintf("mode=%s asset_mode=%s child=%t messages=%d tools=%d shared_rules_total=%d shared_rules_deduped=%d", normalizedMode.String(), string(assetMode), isChildConversationSubagentTypeName(subagentTypeName), len(messages), len(tools), sharedRuleTotal, sharedRuleCount),
+		CompileSummary:     fmt.Sprintf("mode=%s asset_mode=%s child=%t messages=%d tools=%d shared_rules_total=%d shared_rules_deduped=%d response_language=%s", normalizedMode.String(), string(assetMode), isChildConversationSubagentTypeName(subagentTypeName), len(messages), len(tools), sharedRuleTotal, sharedRuleCount, responseLanguage),
 	}, nil
+}
+
+func (compiler *DefaultPromptCompiler) configuredResponseLanguage() string {
+	if compiler == nil || compiler.responseLanguage == nil {
+		return "auto"
+	}
+	return strings.TrimSpace(compiler.responseLanguage.ResponseLanguage())
+}
+
+func resolveResponseLanguage(configured string, latestUserText string) string {
+	switch strings.ToLower(strings.TrimSpace(configured)) {
+	case "en", "en-us":
+		return "en-US"
+	case "zh", "zh-cn":
+		return "zh-CN"
+	case "ja", "ja-jp":
+		return "ja-JP"
+	}
+
+	latinCount := 0
+	hanCount := 0
+	kanaCount := 0
+	for _, value := range latestUserText {
+		switch {
+		case unicode.In(value, unicode.Hiragana, unicode.Katakana):
+			kanaCount++
+		case unicode.In(value, unicode.Han):
+			hanCount++
+		case unicode.Is(unicode.Latin, value) && unicode.IsLetter(value):
+			latinCount++
+		}
+	}
+	switch {
+	case kanaCount > 0:
+		return "ja-JP"
+	case hanCount > latinCount:
+		return "zh-CN"
+	default:
+		return "en-US"
+	}
+}
+
+func responseLanguageInstruction(language string) string {
+	var requirement string
+	switch language {
+	case "zh-CN":
+		requirement = "Use Simplified Chinese for all natural-language responses."
+	case "ja-JP":
+		requirement = "Use Japanese for all natural-language responses."
+	default:
+		requirement = "Use English for all natural-language responses."
+	}
+	return wrapSystemReminder(requirement + " This current-turn requirement overrides older response-language patterns in the conversation. Keep code identifiers, commands, paths, logs, and error text in their original language.")
 }
 
 func (compiler *DefaultPromptCompiler) DerivePromptContexts(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string) ([]PromptContextMessage, error) {

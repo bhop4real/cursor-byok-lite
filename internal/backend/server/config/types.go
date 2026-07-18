@@ -16,10 +16,26 @@ const (
 	DefaultProxyListenAddr                   = "127.0.0.1:18080"
 	DefaultFrontendBaseURL                   = "http://127.0.0.1"
 	DefaultRoutingMode                       = "local"
+	DefaultResponseLanguage                  = "auto"
 	DefaultProviderStreamIdleTimeoutSeconds  = 240
 	DefaultHomeMetricsRefreshIntervalSeconds = 60
 	MinProviderStreamIdleTimeoutSeconds      = 30
 )
+
+func normalizeResponseLanguage(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return "auto"
+	case "en-us", "en":
+		return "en-US"
+	case "zh-cn", "zh":
+		return "zh-CN"
+	case "ja-jp", "ja":
+		return "ja-JP"
+	default:
+		return DefaultResponseLanguage
+	}
+}
 
 type ModelAdapterConfig struct {
 	ID                          string `json:"id,omitempty" yaml:"-"`
@@ -56,6 +72,7 @@ type HomeMetricsConfig struct {
 type Config struct {
 	Log                       bool                 `json:"log" yaml:"log"`
 	DisableUpdates            bool                 `json:"disableUpdates" yaml:"disableUpdates"`
+	ResponseLanguage          string               `json:"responseLanguage" yaml:"responseLanguage"`
 	ProviderStreamIdleTimeout int                  `json:"providerStreamIdleTimeout" yaml:"providerStreamIdleTimeout"`
 	BackendListenAddr         string               `json:"backendListenAddr" yaml:"backendListenAddr"`
 	ProxyListenAddr           string               `json:"proxyListenAddr" yaml:"proxyListenAddr"`
@@ -68,6 +85,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Log:                       false,
+		ResponseLanguage:          DefaultResponseLanguage,
 		ProviderStreamIdleTimeout: DefaultProviderStreamIdleTimeoutSeconds,
 		BackendListenAddr:         DefaultBackendListenAddr,
 		ProxyListenAddr:           DefaultProxyListenAddr,
@@ -85,6 +103,7 @@ func NormalizeConfig(input Config) (Config, error) {
 	output := DefaultConfig()
 	output.Log = input.Log
 	output.DisableUpdates = input.DisableUpdates
+	output.ResponseLanguage = normalizeResponseLanguage(input.ResponseLanguage)
 	output.ProviderStreamIdleTimeout = normalizeProviderStreamIdleTimeout(input.ProviderStreamIdleTimeout)
 	backendListenAddr, err := normalizeListenAddr(input.BackendListenAddr, DefaultBackendListenAddr, "backendListenAddr")
 	if err != nil {

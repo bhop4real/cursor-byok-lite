@@ -604,9 +604,13 @@ function applyHomeMetrics(raw) {
 
 function buildConfigPayload(source = appState) {
   const normalized = normalizeConfig(source);
+  const responseLanguage = asString(source?.responseLanguage);
   return {
     log: normalized.log,
     disableUpdates: normalized.disableUpdates,
+    responseLanguage: ["auto", "en-US", "zh-CN", "ja-JP"].includes(responseLanguage)
+      ? responseLanguage
+      : "auto",
     providerStreamIdleTimeout: normalized.providerStreamIdleTimeout,
     backendListenAddr: normalized.backendListenAddr,
     proxyListenAddr: normalized.proxyListenAddr,

@@ -767,6 +767,12 @@ func mergeConversationMetadata(target *ConversationFile, source *ConversationFil
 	if strings.TrimSpace(source.Mode) != "" {
 		target.Mode = strings.TrimSpace(source.Mode)
 	}
+	if strings.TrimSpace(target.ConversationStartPromptContent) == "" && strings.TrimSpace(source.ConversationStartPromptContent) != "" {
+		target.ConversationStartPromptMode = strings.TrimSpace(source.ConversationStartPromptMode)
+		target.ConversationStartPromptPath = strings.TrimSpace(source.ConversationStartPromptPath)
+		target.ConversationStartPromptModel = strings.TrimSpace(source.ConversationStartPromptModel)
+		target.ConversationStartPromptContent = source.ConversationStartPromptContent
+	}
 	target.TokenDetailsUsedTokens = source.TokenDetailsUsedTokens
 	if source.TokenDetailsMaxTokens > 0 {
 		target.TokenDetailsMaxTokens = source.TokenDetailsMaxTokens
