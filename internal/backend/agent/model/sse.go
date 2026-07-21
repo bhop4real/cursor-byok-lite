@@ -56,9 +56,6 @@ func (err *ProviderStreamError) Error() string {
 	if err.Cause != nil {
 		message += ": " + err.Cause.Error()
 	}
-	if evidence := strings.TrimSpace(err.PayloadPrefix); evidence != "" {
-		message += fmt.Sprintf(" (payload_prefix=%q)", evidence)
-	}
 	return message
 }
 
@@ -259,11 +256,14 @@ func recoverTruncatedOpenAICompletedEvent(provider string, eventType string, pay
 		return "", false
 	}
 	payloadType, responseStatus := inspectPartialOpenAIResponseEnvelope(payload)
-	if payloadType != "response.completed" || responseStatus != "completed" {
-		return "", false
-	}
 	resolvedEventType := strings.TrimSpace(eventType)
-	if resolvedEventType != "" && resolvedEventType != "response.completed" {
+	if payloadType != "" {
+		if resolvedEventType != "" && resolvedEventType != payloadType {
+			return "", false
+		}
+		resolvedEventType = payloadType
+	}
+	if resolvedEventType != "response.completed" || responseStatus != "completed" {
 		return "", false
 	}
 	recovered, err := json.Marshal(map[string]any{

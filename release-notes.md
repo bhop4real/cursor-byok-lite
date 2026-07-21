@@ -4,7 +4,8 @@ QQ group: 1049354347
 
 ### Runtime reliability
 
-- Recovered recurring oversized, truncated OpenAI-compatible terminal frames only when bounded evidence proves a completed response, while preserving the existing retry boundary before semantic output escapes.
+- Recovered recurring oversized, truncated OpenAI-compatible terminal frames when the completed status is carried by either the SSE event name or the JSON envelope, while preserving the existing retry boundary before semantic output escapes.
+- Kept provider stream diagnostics structural at the user-visible error boundary so truncated payloads cannot expose prompt instructions, message history, tool arguments, or response content.
 - Added bounded, idempotent Write and PatchEdit completion with read-only recovery so delayed, duplicated, or missing client results cannot replay mutations or leave operations pending indefinitely.
 - Hardened actor, reconnect, shell-recovery, and checkpoint flows so interrupted work settles once and resumes only its originating provider pass.
 - Preserved current-pass tool contracts and complete AskQuestion selections across replay and continuation.
