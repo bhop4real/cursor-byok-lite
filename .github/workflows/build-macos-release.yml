@@ -50,8 +50,8 @@ jobs:
           import re
 
           version = os.environ["RELEASE_VERSION"].strip()
-          if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
-              raise SystemExit("version input must be an explicit semantic version without a leading v")
+          if not re.fullmatch(r"\d+(?:\.\d+){2,3}(?:-[0-9A-Za-z.-]+)?", version):
+              raise SystemExit("version input must have three or four numeric components without a leading v")
 
           config_path = pathlib.Path("build/config.yml")
           config = config_path.read_text(encoding="utf-8")

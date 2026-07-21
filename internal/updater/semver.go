@@ -6,24 +6,23 @@ import (
 )
 
 type semanticVersion struct {
-	major      int
-	minor      int
-	patch      int
+	numbers    []int
 	prerelease string
 }
 
 func compareVersionNumbers(a, b string) int {
 	left := parseVersion(a)
 	right := parseVersion(b)
+	componentCount := max(len(left.numbers), len(right.numbers))
 
-	switch {
-	case left.major != right.major:
-		return compareInts(left.major, right.major)
-	case left.minor != right.minor:
-		return compareInts(left.minor, right.minor)
-	default:
-		return compareInts(left.patch, right.patch)
+	for index := range componentCount {
+		leftNumber := versionNumberAt(left.numbers, index)
+		rightNumber := versionNumberAt(right.numbers, index)
+		if leftNumber != rightNumber {
+			return compareInts(leftNumber, rightNumber)
+		}
 	}
+	return 0
 }
 
 func compareVersions(a, b string) int {
@@ -76,17 +75,18 @@ func parseVersion(raw string) semanticVersion {
 	}
 
 	parts := strings.Split(clean, ".")
-	result := semanticVersion{prerelease: prerelease}
-	if len(parts) > 0 {
-		result.major = atoi(parts[0])
+	numbers := make([]int, len(parts))
+	for index, part := range parts {
+		numbers[index] = atoi(part)
 	}
-	if len(parts) > 1 {
-		result.minor = atoi(parts[1])
+	return semanticVersion{numbers: numbers, prerelease: prerelease}
+}
+
+func versionNumberAt(numbers []int, index int) int {
+	if index >= len(numbers) {
+		return 0
 	}
-	if len(parts) > 2 {
-		result.patch = atoi(parts[2])
-	}
-	return result
+	return numbers[index]
 }
 
 func atoi(raw string) int {
