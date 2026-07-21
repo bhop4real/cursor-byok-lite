@@ -69,6 +69,7 @@ type streamTimerKind string
 const (
 	streamTimerProviderResume       streamTimerKind = "provider_resume"
 	streamTimerNonStreamingRecovery streamTimerKind = "non_streaming_recovery"
+	streamTimerHiddenEditStage      streamTimerKind = "hidden_edit_stage"
 	streamTimerShellForeground      streamTimerKind = "shell_foreground"
 	streamTimerShellTransportClose  streamTimerKind = "shell_transport_close"
 	streamTimerOrphanCancel         streamTimerKind = "orphan_cancel"
@@ -695,9 +696,7 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 		stream.mu.Unlock()
 		return service.handleToolInvocation(stream, invocation)
 	case modeladapter.ModelEventKindTurnFinished:
-		stream.mu.Lock()
-		stream.ProviderFinishReason = strings.TrimSpace(event.FinishReason)
-		stream.ProviderUsage = turnUsageSnapshot{
+		usage := turnUsageSnapshot{
 			Provider:          event.Provider,
 			Model:             event.Model,
 			InputTokens:       event.InputTokens,
@@ -708,8 +707,12 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 			CacheReadPresent:  event.CacheReadPresent,
 			CacheWritePresent: event.CacheWritePresent,
 		}
+		stream.mu.Lock()
+		stream.ProviderFinishReason = strings.TrimSpace(event.FinishReason)
+		stream.ProviderUsage = usage
 		stream.UpdatedAt = time.Now().UTC()
 		stream.mu.Unlock()
+		rememberProviderReportedPromptTokens(stream, modelCallID, usage)
 		return nil
 	case modeladapter.ModelEventKindProviderError:
 		if event.Err != nil {
@@ -1179,6 +1182,12 @@ func (service *Service) handleTimerEvent(stream *ActiveStream, payload *streamTi
 			return nil
 		}
 		return service.recoverNonStreamingExecAfterStreamClose(stream, current)
+	case streamTimerHiddenEditStage:
+		current, ok := snapshotPendingExec(stream, payload.ExecID)
+		if !ok || current.MessageID != payload.MessageID || !isHiddenEditExecKind(current.ExecKind) {
+			return nil
+		}
+		return service.recoverHiddenEditStage(stream, current, payload.Reason)
 	case streamTimerShellForeground:
 		return service.recoverShellWithoutTerminalIfNeeded(stream, payload.ExecID, payload.MessageID, shellRecoveryReasonForegroundDeadline)
 	case streamTimerShellTransportClose:

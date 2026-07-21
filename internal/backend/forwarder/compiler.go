@@ -20,6 +20,10 @@ type replayPromptCompiler interface {
 	CompileWithReplay(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string, replayMessages []modeladapter.Message) (CompiledConversation, error)
 }
 
+type providerProjectionPromptCompiler interface {
+	CompileProviderProjection(canonical CompiledConversation, conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string) CompiledConversation
+}
+
 type ResponseLanguageSource interface {
 	ResponseLanguage() string
 }
@@ -119,13 +123,83 @@ func (compiler *DefaultPromptCompiler) CompileWithReplay(conversation *Conversat
 		Role:    "user",
 		Content: currentPassExecutionContract(conversation, replayMessages),
 	})
+	promptProfile := PromptProfileBaseline
+	if conversation != nil {
+		promptProfile = normalizedPromptProfile(conversation.PromptProfile)
+	}
 	return CompiledConversation{
 		Mode:               normalizedMode,
+		PromptProfile:      promptProfile,
 		Messages:           messages,
 		StableMessageCount: stableReplayCount,
 		Tools:              tools,
-		CompileSummary:     fmt.Sprintf("mode=%s asset_mode=%s child=%t messages=%d tools=%d shared_rules_total=%d shared_rules_deduped=%d response_language=%s", normalizedMode.String(), string(assetMode), isChildConversationSubagentTypeName(subagentTypeName), len(messages), len(tools), sharedRuleTotal, sharedRuleCount, responseLanguage),
+		CompileSummary:     fmt.Sprintf("mode=%s asset_mode=%s child=%t messages=%d tools=%d shared_rules_total=%d shared_rules_deduped=%d response_language=%s prompt_profile=%s", normalizedMode.String(), string(assetMode), isChildConversationSubagentTypeName(subagentTypeName), len(messages), len(tools), sharedRuleTotal, sharedRuleCount, responseLanguage, promptProfile),
 	}, nil
+}
+
+// CompileProviderProjection is the only profile-aware boundary used for model
+// dispatch. It never mutates the canonical conversation or compiled checkpoint
+// view, and falls back to that canonical view if projection cannot be decoded.
+func (compiler *DefaultPromptCompiler) CompileProviderProjection(canonical CompiledConversation, conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string) CompiledConversation {
+	canonical.PromptProfile = normalizedPromptProfile(canonical.PromptProfile)
+	if canonical.PromptProfile != PromptProfileCompactContextToolsV1 || conversation == nil {
+		return canonical
+	}
+
+	projectedConversation, diagnostics, err := compactProviderProjectionConversation(conversation, canonical.Tools)
+	if err != nil {
+		diagnostics = providerProjectionDiagnostics{
+			Profile:        PromptProfileCompactContextToolsV1,
+			FallbackReason: "projection_decode_error",
+		}
+		return applyCompactProjectionDiagnostics(canonical, diagnostics)
+	}
+	projectedReplay, err := compiler.projector.ProjectPromptReplay(projectedConversation)
+	if err != nil {
+		diagnostics.FallbackReason = "replay_projection_error"
+		return applyCompactProjectionDiagnostics(canonical, diagnostics)
+	}
+	projected, err := compiler.CompileWithReplay(projectedConversation, mode, latestUserText, modelName, projectedReplay)
+	if err != nil {
+		diagnostics.FallbackReason = "compile_error"
+		return applyCompactProjectionDiagnostics(canonical, diagnostics)
+	}
+
+	seenTailMessages := make(map[string]struct{})
+	for _, message := range projected.Messages {
+		if strings.TrimSpace(message.Role) != "user" || strings.TrimSpace(message.Content) == "" {
+			continue
+		}
+		seenTailMessages[promptContextContentHash(message)] = struct{}{}
+	}
+	for _, message := range compactCurrentTurnPersistedTailMessages(conversation) {
+		projected.Messages = appendUniqueProviderTailMessage(projected.Messages, seenTailMessages, message)
+	}
+	projected.RequiresToolCapabilityProjection = true
+	return applyCompactProjectionDiagnostics(projected, diagnostics)
+}
+
+func compileProviderEffectiveConversation(compiler PromptCompiler, canonical CompiledConversation, conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string, toolCapabilities MCPToolCapabilities) CompiledConversation {
+	providerCompiled := canonical
+	if projectionCompiler, ok := compiler.(providerProjectionPromptCompiler); ok {
+		providerCompiled = projectionCompiler.CompileProviderProjection(canonical, conversation, mode, latestUserText, modelName)
+		providerCompiled = guardCompiledConversationForProvider(providerCompiled)
+		if providerCompiled.RequiresToolCapabilityProjection {
+			providerCompiled = applyProviderToolCapabilities(providerCompiled, toolCapabilities)
+			providerCompiled.RequiresToolCapabilityProjection = false
+		}
+	}
+	return providerCompiled
+}
+
+func (compiler *DefaultPromptCompiler) CompileProviderProjectionWithReplay(conversation *ConversationFile, mode agentv1.AgentMode, latestUserText string, modelName string, replayMessages []modeladapter.Message, toolCapabilities MCPToolCapabilities) (CompiledConversation, error) {
+	canonical, err := compiler.CompileWithReplay(conversation, mode, latestUserText, modelName, replayMessages)
+	if err != nil {
+		return CompiledConversation{}, err
+	}
+	canonical = guardCompiledConversationForProvider(canonical)
+	canonical = applyProviderToolCapabilities(canonical, toolCapabilities)
+	return compileProviderEffectiveConversation(compiler, canonical, conversation, mode, latestUserText, modelName, toolCapabilities), nil
 }
 
 func (compiler *DefaultPromptCompiler) configuredResponseLanguage() string {

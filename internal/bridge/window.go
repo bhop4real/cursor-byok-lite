@@ -1,19 +1,23 @@
 package bridge
 
 import (
-	"cursor/internal/buildinfo"
-	"cursor/internal/client"
-	"cursor/internal/updater"
 	"fmt"
 	"os"
 	"os/exec"
 	goruntime "runtime"
+	"strings"
 	"sync"
+
+	"cursor/internal/buildinfo"
+	"cursor/internal/client"
+	"cursor/internal/updater"
 
 	"github.com/leaanthony/u"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
+
+const maxWindowTitleLength = 160
 
 // modelEditorContext 保存当前模型编辑器窗口的初始化上下文。
 type modelEditorContext struct {
@@ -21,10 +25,20 @@ type modelEditorContext struct {
 	AdapterJSON string `json:"adapterJSON"`
 }
 
+// WindowTitles contains frontend-localized titles for known native windows.
+type WindowTitles struct {
+	Main            string `json:"main"`
+	Config          string `json:"config"`
+	ModelConfig     string `json:"modelConfig"`
+	ModelEditorAdd  string `json:"modelEditorAdd"`
+	ModelEditorEdit string `json:"modelEditorEdit"`
+}
+
 // WindowService 定义了当前模块中的 WindowService 类型。
 type WindowService struct {
 	app               *application.App
 	updater           *updater.Manager
+	titles            WindowTitles
 	configWindow      *application.WebviewWindow
 	modelConfigWindow *application.WebviewWindow
 	modelEditorWindow *application.WebviewWindow
@@ -34,7 +48,17 @@ type WindowService struct {
 
 // NewWindowService 用于处理与 NewWindowService 相关的逻辑。
 func NewWindowService() *WindowService {
-	return &WindowService{}
+	return &WindowService{titles: defaultWindowTitles()}
+}
+
+func defaultWindowTitles() WindowTitles {
+	return WindowTitles{
+		Main:            "Cursor 助手",
+		Config:          "设置",
+		ModelConfig:     "模型配置",
+		ModelEditorAdd:  "新增模型配置",
+		ModelEditorEdit: "编辑模型配置",
+	}
 }
 
 // SetApp 用于处理与 SetApp 相关的逻辑。
@@ -78,6 +102,84 @@ func (s *WindowService) InstallReadyUpdate() error {
 	return manager.InstallReadyUpdate()
 }
 
+// SetWindowTitle updates only the native window identified by the caller.
+func (s *WindowService) SetWindowTitle(windowID uint, title string) error {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fmt.Errorf("window title is required")
+	}
+	if len([]rune(title)) > maxWindowTitleLength {
+		return fmt.Errorf("window title must not exceed %d characters", maxWindowTitleLength)
+	}
+
+	s.mu.RLock()
+	app := s.app
+	s.mu.RUnlock()
+	if app == nil {
+		return fmt.Errorf("application is not initialized")
+	}
+	window, ok := app.Window.GetByID(windowID)
+	if !ok {
+		return fmt.Errorf("window %d does not exist", windowID)
+	}
+	window.SetTitle(title)
+	return nil
+}
+
+// UpdateWindowTitles stores localized defaults and refreshes open subwindows.
+func (s *WindowService) UpdateWindowTitles(titles WindowTitles) error {
+	normalized, err := normalizeWindowTitles(titles)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.titles = normalized
+	if s.configWindow != nil {
+		s.configWindow.SetTitle(normalized.Config)
+	}
+	if s.modelConfigWindow != nil {
+		s.modelConfigWindow.SetTitle(normalized.ModelConfig)
+	}
+	if s.modelEditorWindow != nil {
+		title := normalized.ModelEditorAdd
+		if s.editorCtx != nil && s.editorCtx.Index >= 0 {
+			title = normalized.ModelEditorEdit
+		}
+		s.modelEditorWindow.SetTitle(title)
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+func normalizeWindowTitles(titles WindowTitles) (WindowTitles, error) {
+	defaults := defaultWindowTitles()
+	values := []*string{
+		&titles.Main,
+		&titles.Config,
+		&titles.ModelConfig,
+		&titles.ModelEditorAdd,
+		&titles.ModelEditorEdit,
+	}
+	fallbacks := []string{
+		defaults.Main,
+		defaults.Config,
+		defaults.ModelConfig,
+		defaults.ModelEditorAdd,
+		defaults.ModelEditorEdit,
+	}
+	for index, value := range values {
+		*value = strings.TrimSpace(*value)
+		if *value == "" {
+			*value = fallbacks[index]
+		}
+		if len([]rune(*value)) > maxWindowTitleLength {
+			return WindowTitles{}, fmt.Errorf("window title must not exceed %d characters", maxWindowTitleLength)
+		}
+	}
+	return titles, nil
+}
+
 // OpenConfigWindow 打开设置窗口。如果窗口已存在则聚焦。
 func (s *WindowService) OpenConfigWindow() {
 	s.mu.Lock()
@@ -93,7 +195,7 @@ func (s *WindowService) OpenConfigWindow() {
 	}
 
 	win := s.app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:               "设置",
+		Title:               s.titles.Config,
 		Width:               820,
 		Height:              680,
 		MinWidth:            700,
@@ -158,7 +260,7 @@ func (s *WindowService) OpenModelConfigWindow() {
 	}
 
 	win := s.app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:               "模型配置",
+		Title:               s.titles.ModelConfig,
 		Width:               980,
 		Height:              700,
 		MinWidth:            820,
@@ -220,14 +322,19 @@ func (s *WindowService) OpenModelEditorWindow(index int, adapterJSON string) {
 	}
 
 	if s.modelEditorWindow != nil {
+		title := s.titles.ModelEditorAdd
+		if index >= 0 {
+			title = s.titles.ModelEditorEdit
+		}
+		s.modelEditorWindow.SetTitle(title)
 		s.modelEditorWindow.Show()
 		s.modelEditorWindow.Focus()
 		return
 	}
 
-	title := "新增模型配置"
+	title := s.titles.ModelEditorAdd
 	if index >= 0 {
-		title = "编辑模型配置"
+		title = s.titles.ModelEditorEdit
 	}
 
 	win := s.app.Window.NewWithOptions(application.WebviewWindowOptions{

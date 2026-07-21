@@ -72,6 +72,7 @@ type HomeMetricsConfig struct {
 type Config struct {
 	Log                       bool                 `json:"log" yaml:"log"`
 	DisableUpdates            bool                 `json:"disableUpdates" yaml:"disableUpdates"`
+	CompactContextTools       bool                 `json:"compactContextTools" yaml:"compactContextTools"`
 	ResponseLanguage          string               `json:"responseLanguage" yaml:"responseLanguage"`
 	ProviderStreamIdleTimeout int                  `json:"providerStreamIdleTimeout" yaml:"providerStreamIdleTimeout"`
 	BackendListenAddr         string               `json:"backendListenAddr" yaml:"backendListenAddr"`
@@ -82,9 +83,103 @@ type Config struct {
 	LastAgentModelHash        string               `json:"lastAgentModelHash" yaml:"lastAgentModelHash"`
 }
 
+type RoutingConfigPatch struct {
+	Mode *string `json:"mode,omitempty"`
+}
+
+type HomeMetricsConfigPatch struct {
+	IncludeCacheWriteInHitRate *bool `json:"includeCacheWriteInHitRate,omitempty"`
+	RefreshIntervalSeconds     *int  `json:"refreshIntervalSeconds,omitempty"`
+}
+
+// ConfigPatch contains only user-owned fields. Pointer values distinguish an
+// omitted field from an explicit false, zero, or empty value.
+type ConfigPatch struct {
+	Log                       *bool                   `json:"log,omitempty"`
+	DisableUpdates            *bool                   `json:"disableUpdates,omitempty"`
+	CompactContextTools       *bool                   `json:"compactContextTools,omitempty"`
+	ResponseLanguage          *string                 `json:"responseLanguage,omitempty"`
+	ProviderStreamIdleTimeout *int                    `json:"providerStreamIdleTimeout,omitempty"`
+	BackendListenAddr         *string                 `json:"backendListenAddr,omitempty"`
+	ProxyListenAddr           *string                 `json:"proxyListenAddr,omitempty"`
+	Routing                   *RoutingConfigPatch     `json:"routing,omitempty"`
+	HomeMetrics               *HomeMetricsConfigPatch `json:"homeMetrics,omitempty"`
+}
+
+type EditableFieldMetadata struct {
+	Path       string   `json:"path"`
+	Type       string   `json:"type"`
+	Default    any      `json:"default"`
+	Minimum    *int     `json:"minimum,omitempty"`
+	Enum       []string `json:"enum,omitempty"`
+	Trim       bool     `json:"trim"`
+	Secret     bool     `json:"secret"`
+	ApplyScope string   `json:"applyScope"`
+}
+
+type EditableConfigMetadata struct {
+	Fields []EditableFieldMetadata `json:"fields"`
+}
+
+func EditableConfigContract() EditableConfigMetadata {
+	providerMinimum := MinProviderStreamIdleTimeoutSeconds
+	refreshMinimum := 1
+	return EditableConfigMetadata{Fields: []EditableFieldMetadata{
+		{Path: "log", Type: "boolean", Default: false, ApplyScope: "immediate"},
+		{Path: "disableUpdates", Type: "boolean", Default: false, ApplyScope: "app_restart"},
+		{Path: "compactContextTools", Type: "boolean", Default: false, ApplyScope: "new_conversations_only"},
+		{Path: "responseLanguage", Type: "enum", Default: DefaultResponseLanguage, Enum: []string{"auto", "en-US", "zh-CN", "ja-JP"}, Trim: true, ApplyScope: "next_request"},
+		{Path: "providerStreamIdleTimeout", Type: "integer", Default: DefaultProviderStreamIdleTimeoutSeconds, Minimum: &providerMinimum, ApplyScope: "next_request"},
+		{Path: "backendListenAddr", Type: "string", Default: DefaultBackendListenAddr, Trim: true, ApplyScope: "service_restart"},
+		{Path: "proxyListenAddr", Type: "string", Default: DefaultProxyListenAddr, Trim: true, ApplyScope: "service_restart"},
+		{Path: "routing.mode", Type: "enum", Default: DefaultRoutingMode, Enum: []string{"local", "upstream"}, Trim: true, ApplyScope: "next_request"},
+		{Path: "homeMetrics.includeCacheWriteInHitRate", Type: "boolean", Default: false, ApplyScope: "immediate"},
+		{Path: "homeMetrics.refreshIntervalSeconds", Type: "integer", Default: DefaultHomeMetricsRefreshIntervalSeconds, Minimum: &refreshMinimum, ApplyScope: "immediate"},
+	}}
+}
+
+func ApplyConfigPatch(current Config, patch ConfigPatch) (Config, error) {
+	next := current
+	if patch.Log != nil {
+		next.Log = *patch.Log
+	}
+	if patch.DisableUpdates != nil {
+		next.DisableUpdates = *patch.DisableUpdates
+	}
+	if patch.CompactContextTools != nil {
+		next.CompactContextTools = *patch.CompactContextTools
+	}
+	if patch.ResponseLanguage != nil {
+		next.ResponseLanguage = strings.TrimSpace(*patch.ResponseLanguage)
+	}
+	if patch.ProviderStreamIdleTimeout != nil {
+		next.ProviderStreamIdleTimeout = *patch.ProviderStreamIdleTimeout
+	}
+	if patch.BackendListenAddr != nil {
+		next.BackendListenAddr = strings.TrimSpace(*patch.BackendListenAddr)
+	}
+	if patch.ProxyListenAddr != nil {
+		next.ProxyListenAddr = strings.TrimSpace(*patch.ProxyListenAddr)
+	}
+	if patch.Routing != nil && patch.Routing.Mode != nil {
+		next.Routing.Mode = strings.TrimSpace(*patch.Routing.Mode)
+	}
+	if patch.HomeMetrics != nil {
+		if patch.HomeMetrics.IncludeCacheWriteInHitRate != nil {
+			next.HomeMetrics.IncludeCacheWriteInHitRate = *patch.HomeMetrics.IncludeCacheWriteInHitRate
+		}
+		if patch.HomeMetrics.RefreshIntervalSeconds != nil {
+			next.HomeMetrics.RefreshIntervalSeconds = *patch.HomeMetrics.RefreshIntervalSeconds
+		}
+	}
+	return NormalizeConfig(next)
+}
+
 func DefaultConfig() Config {
 	return Config{
 		Log:                       false,
+		DisableUpdates:            false,
+		CompactContextTools:       false,
 		ResponseLanguage:          DefaultResponseLanguage,
 		ProviderStreamIdleTimeout: DefaultProviderStreamIdleTimeoutSeconds,
 		BackendListenAddr:         DefaultBackendListenAddr,
@@ -103,6 +198,7 @@ func NormalizeConfig(input Config) (Config, error) {
 	output := DefaultConfig()
 	output.Log = input.Log
 	output.DisableUpdates = input.DisableUpdates
+	output.CompactContextTools = input.CompactContextTools
 	output.ResponseLanguage = normalizeResponseLanguage(input.ResponseLanguage)
 	output.ProviderStreamIdleTimeout = normalizeProviderStreamIdleTimeout(input.ProviderStreamIdleTimeout)
 	backendListenAddr, err := normalizeListenAddr(input.BackendListenAddr, DefaultBackendListenAddr, "backendListenAddr")

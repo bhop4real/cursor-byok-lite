@@ -15,6 +15,12 @@ type ProxyState = client.ProxyState
 // UserConfig 定义了当前模块中的 UserConfig 类型。
 type UserConfig = client.UserConfig
 
+// UserConfigPatch contains only settings explicitly changed by the UI.
+type UserConfigPatch = client.UserConfigPatch
+
+// EditableConfigMetadata describes the backend-owned settings contract.
+type EditableConfigMetadata = client.EditableConfigMetadata
+
 // ModelAdapterConfig 定义模型测速使用的模型配置结构。
 type ModelAdapterConfig = serverconfig.ModelAdapterConfig
 
@@ -81,6 +87,11 @@ func (s *ProxyService) SetBaseURL(baseURL string) (ProxyState, error) {
 	return s.core.SetBaseURL(baseURL)
 }
 
+// GetEditableConfigMetadata returns the public settings contract.
+func (s *ProxyService) GetEditableConfigMetadata() EditableConfigMetadata {
+	return s.core.GetEditableConfigMetadata()
+}
+
 // LoadUserConfig 用于处理与 LoadUserConfig 相关的逻辑。
 func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
 	return s.core.LoadUserConfig()
@@ -89,6 +100,11 @@ func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
 // SaveUserConfig 用于处理与 SaveUserConfig 相关的逻辑。
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 	return s.core.SaveUserConfig(cfg)
+}
+
+// PatchUserConfig updates only fields explicitly provided by the UI.
+func (s *ProxyService) PatchUserConfig(patch UserConfigPatch) (UserConfig, error) {
+	return s.core.PatchUserConfig(patch)
 }
 
 // TestModelAdapter 用于处理与 TestModelAdapter 相关的逻辑。

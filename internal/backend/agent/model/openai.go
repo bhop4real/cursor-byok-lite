@@ -654,6 +654,9 @@ func (adapter *OpenAIAdapter) streamChatCompletions(ctx context.Context, req Str
 		return emitTaggedContentParts(thinkParser.Flush())
 	}
 	fail := func(streamErr error) error {
+		if decoded := decodeProviderStreamErrorMarker(streamErr.Error()); decoded != nil {
+			streamErr = decoded
+		}
 		finishedAt = time.Now().UTC()
 		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", currentModel, startedAt, firstEventAt, finishedAt, finishReason, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, streamErr))
 		return streamErr
@@ -715,7 +718,7 @@ func (adapter *OpenAIAdapter) streamChatCompletions(ctx context.Context, req Str
 		cacheWriteTokens = 0
 		cacheWritePresent = true
 	}
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(canonicalSSEReader(resp.Body, "openai"))
 	scanner.Buffer(make([]byte, 0, 64*1024), openAIStreamMaxTokenSize)
 	for scanner.Scan() {
 		rawLine := scanner.Text()
@@ -1168,6 +1171,9 @@ func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamReq
 		return emitTaggedContentParts(thinkParser.Flush())
 	}
 	fail := func(streamErr error) error {
+		if decoded := decodeProviderStreamErrorMarker(streamErr.Error()); decoded != nil {
+			streamErr = decoded
+		}
 		finishedAt = time.Now().UTC()
 		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", currentModel, startedAt, firstEventAt, finishedAt, finishReason, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, streamErr))
 		return streamErr
@@ -1417,7 +1423,7 @@ func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamReq
 		return fmt.Errorf("openai responses stream failed")
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(canonicalSSEReader(resp.Body, "openai"))
 	scanner.Buffer(make([]byte, 0, 64*1024), openAIStreamMaxTokenSize)
 	for scanner.Scan() {
 		rawLine := scanner.Text()

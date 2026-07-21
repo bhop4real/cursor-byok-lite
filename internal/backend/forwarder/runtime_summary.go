@@ -10,7 +10,7 @@ import (
 	modeladapter "cursor/internal/backend/agent/model"
 )
 
-func newRuntimeConversation(conversationID string, mode agentv1.AgentMode) (*ConversationFile, error) {
+func newRuntimeConversation(conversationID string, mode agentv1.AgentMode, promptProfile string) (*ConversationFile, error) {
 	now := time.Now().UTC()
 	normalizedID := strings.TrimSpace(conversationID)
 	alias, err := modeAlias(mode)
@@ -21,6 +21,7 @@ func newRuntimeConversation(conversationID string, mode agentv1.AgentMode) (*Con
 		ConversationID:     normalizedID,
 		RootConversationID: normalizedID,
 		Mode:               alias,
+		PromptProfile:      normalizedPromptProfile(promptProfile),
 		CreatedAt:          now,
 		UpdatedAt:          now,
 		NextTurnSeq:        1,
@@ -43,7 +44,11 @@ func (service *Service) bootstrapRuntimeConversation(intent InboundIntent) (*Con
 		}
 	}
 	if conversation == nil {
-		conversation, err = newRuntimeConversation(intent.ConversationID, intent.Mode)
+		promptProfile := PromptProfileBaseline
+		if !conversationStateHasPriorHistory(intent.ConversationState) {
+			promptProfile = enrollmentPromptProfile(service.compactContextToolsEnrollmentSource())
+		}
+		conversation, err = newRuntimeConversation(intent.ConversationID, intent.Mode, promptProfile)
 		if err != nil {
 			return nil, agentv1.AgentMode_AGENT_MODE_AGENT, 0, nil, err
 		}
@@ -115,12 +120,13 @@ func (service *Service) syncConversationRecord(conversationID string, conversati
 	if err != nil {
 		return err
 	}
-	if _, err := service.store.CreateConversation(
+	if _, err := service.store.createConversation(
 		conversationID,
 		mode,
 		conversation.ParentConversationID,
 		conversation.ParentToolCallID,
 		conversation.RootConversationID,
+		conversation.PromptProfile,
 	); err != nil {
 		return err
 	}

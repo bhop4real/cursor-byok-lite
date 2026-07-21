@@ -92,6 +92,22 @@ func (host *Host) SaveConfig(ctx context.Context, cfg serverconfig.Config) (serv
 	return normalized, nil
 }
 
+func (host *Host) PatchConfig(ctx context.Context, patch serverconfig.ConfigPatch) (serverconfig.Config, error) {
+	if host == nil || host.configs == nil {
+		return serverconfig.Config{}, fmt.Errorf("backend config manager is not initialized")
+	}
+	normalized, err := host.configs.Patch(ctx, patch)
+	if err != nil {
+		return serverconfig.Config{}, err
+	}
+	if host.httpServer == nil {
+		if rebuildErr := host.rebuild(normalized); rebuildErr != nil {
+			return serverconfig.Config{}, rebuildErr
+		}
+	}
+	return normalized, nil
+}
+
 func (host *Host) ListenAddr() string {
 	if host == nil {
 		return ""

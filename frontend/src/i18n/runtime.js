@@ -1,5 +1,5 @@
 import { computed, ref } from "vue";
-import { Events } from "@wailsio/runtime";
+import { Call, Events, Window } from "@wailsio/runtime";
 import {
   DEFAULT_LOCALE,
   LOCALE_OPTIONS,
@@ -12,6 +12,14 @@ import zhCNMessages from "@/i18n/locales/zh-CN.json";
 import enUSMessages from "@/i18n/locales/en-US.json";
 import jaJPMessages from "@/i18n/locales/ja-JP.json";
 
+const WINDOW_SERVICE_NAME = "cursor/internal/bridge.WindowService";
+const WINDOW_TITLE_MESSAGES = {
+  main: ["a080764958512426", "Cursor 助手"],
+  config: ["df3d58c7d84b85f2", "设置"],
+  modelConfig: ["8cbcf741e727dbf7", "模型配置"],
+  modelEditorAdd: ["1bc77f5ab979f4c1", "新增模型配置"],
+  modelEditorEdit: ["d2243e1d44b2a94e", "编辑模型配置"],
+};
 const localeMessages = {
   "zh-CN": zhCNMessages,
   "en-US": enUSMessages,
@@ -103,6 +111,35 @@ function persistManualLocale(locale) {
   window.localStorage.setItem(LOCALE_STORAGE_SOURCE_KEY, "manual");
 }
 
+function windowTitles(locale) {
+  const activeMessages = localeMessages[locale] || {};
+  const sourceMessages = localeMessages[SOURCE_LOCALE] || {};
+  return Object.fromEntries(
+    Object.entries(WINDOW_TITLE_MESSAGES).map(([key, [id, fallback]]) => [
+      key,
+      activeMessages[id] || sourceMessages[id] || fallback,
+    ]),
+  );
+}
+
+function isMainWindow() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const routePath = String(window.location.hash || "#/").split("?")[0];
+  return routePath === "#/" || routePath === "" || routePath === "#";
+}
+
+async function syncNativeWindowTitles(locale) {
+  const titles = windowTitles(locale);
+  const updates = [Call.ByName(`${WINDOW_SERVICE_NAME}.UpdateWindowTitles`, titles)];
+  if (isMainWindow()) {
+    const windowID = await Window.ID();
+    updates.push(Call.ByName(`${WINDOW_SERVICE_NAME}.SetWindowTitle`, windowID, titles.main));
+  }
+  await Promise.all(updates);
+}
+
 function resolveMessage(id, fallback) {
   const activeMessages = localeMessages[currentLocale.value] || {};
   const sourceMessages = localeMessages[SOURCE_LOCALE] || {};
@@ -145,6 +182,15 @@ class LocalizedText extends String {
 const currentLocale = ref(resolveInitialLocale());
 applyLocaleToDocument(currentLocale.value);
 Events.Emit("locale:changed", currentLocale.value);
+Events.On("locale:changed", (event) => {
+  const nextLocale = matchSupportedLocale(event?.data ?? event);
+  if (!nextLocale || nextLocale === currentLocale.value) {
+    return;
+  }
+  currentLocale.value = nextLocale;
+  applyLocaleToDocument(nextLocale);
+  void syncNativeWindowTitles(nextLocale).catch(() => {});
+});
 
 const localizedCache = new Map();
 
@@ -158,6 +204,7 @@ export function setLocale(locale) {
   persistManualLocale(nextLocale);
   applyLocaleToDocument(nextLocale);
   Events.Emit("locale:changed", nextLocale);
+  void syncNativeWindowTitles(nextLocale).catch(() => {});
   return nextLocale;
 }
 
@@ -185,4 +232,5 @@ export function localizedTemplate(id, fallback, args = []) {
 export function installI18nRuntime(app) {
   app.config.globalProperties.$ls = localized;
   app.config.globalProperties.$lt = localizedTemplate;
+  void syncNativeWindowTitles(currentLocale.value).catch(() => {});
 }

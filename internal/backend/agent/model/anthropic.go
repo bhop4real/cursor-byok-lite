@@ -402,6 +402,9 @@ func (adapter *AnthropicAdapter) Stream(ctx context.Context, req StreamRequest, 
 	finishReason := "message_stop"
 	firstEventAt := time.Time{}
 	fail := func(streamErr error) error {
+		if decoded := decodeProviderStreamErrorMarker(streamErr.Error()); decoded != nil {
+			streamErr = decoded
+		}
 		finishedAt = time.Now().UTC()
 		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "anthropic", currentModel, startedAt, firstEventAt, finishedAt, finishReason, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, streamErr))
 		return streamErr
@@ -534,7 +537,7 @@ func (adapter *AnthropicAdapter) Stream(ctx context.Context, req StreamRequest, 
 		}
 		return fmt.Errorf("anthropic provider error")
 	}
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(canonicalSSEReader(resp.Body, "anthropic"))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	currentEvent := ""
 	dataLines := make([]string, 0, 2)

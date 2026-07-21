@@ -23,8 +23,12 @@ type artifactRecorder struct {
 }
 
 type artifactSession struct {
-	conversationID string
-	requestPrefix  *requestArtifactPrefix
+	conversationID          string
+	requestPrefix           *requestArtifactPrefix
+	requestObservedAt       time.Time
+	firstResponseObservedAt time.Time
+	lastResponseObservedAt  time.Time
+	responseChunkCount      int
 }
 
 type requestArtifactPrefix struct {
@@ -66,6 +70,7 @@ func (recorder *artifactRecorder) RecordLLMRequest(requestID string, _ string, m
 		recorder.mu.Unlock()
 		recorder.persistLatestRequestPrefix(session.conversationID, requestID, modelCallID, prefix)
 	}
+	recorder.observeProviderRequest(requestID, modelCallID, session.conversationID, payload)
 	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_request", payload)
 	return "", nil
 }
@@ -75,6 +80,7 @@ func (recorder *artifactRecorder) AppendLLMResponseChunk(requestID string, runID
 	if err != nil {
 		return "", err
 	}
+	recorder.observeProviderChunk(requestID, modelCallID, session.conversationID, len([]byte(chunk)))
 	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_response_chunk", map[string]any{
 		"run_id":    strings.TrimSpace(runID),
 		"raw_chunk": chunk,
@@ -99,6 +105,7 @@ func (recorder *artifactRecorder) RecordLLMSummary(requestID string, _ string, m
 		recorder.mu.Unlock()
 		recorder.persistLatestRequestPrefix(session.conversationID, requestID, modelCallID, &prefix)
 	}
+	recorder.observeProviderSummary(requestID, modelCallID, session.conversationID, payload)
 	recorder.debug.LogProviderArtifact(context.Background(), requestID, session.conversationID, modelCallID, "llm_summary", payload)
 	return "", nil
 }

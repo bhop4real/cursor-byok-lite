@@ -530,12 +530,15 @@ func (m *Manager) emitState(state State, info *UpdateInfo, errMsg, message strin
 		return
 	}
 
+	messageCode, messageArgs := stateMessage(state, message)
 	payload := StatePayload{
-		State:      string(state),
-		Error:      strings.TrimSpace(errMsg),
-		Message:    strings.TrimSpace(message),
-		Prompt:     prompt,
-		PromptKind: strings.TrimSpace(promptKind),
+		State:       string(state),
+		Error:       strings.TrimSpace(errMsg),
+		Message:     messageCode,
+		MessageCode: messageCode,
+		MessageArgs: messageArgs,
+		Prompt:      prompt,
+		PromptKind:  strings.TrimSpace(promptKind),
 	}
 	if info != nil {
 		payload.Version = info.Version
@@ -595,15 +598,34 @@ func (m *Manager) emitError(info *UpdateInfo, errMsg string, prompt bool) {
 	}
 
 	payload := ErrorPayload{
-		State:      string(StateError),
-		Error:      strings.TrimSpace(errMsg),
-		Prompt:     prompt,
-		PromptKind: "error",
+		State:       string(StateError),
+		Error:       strings.TrimSpace(errMsg),
+		Message:     "update.failed",
+		MessageCode: "update.failed",
+		Prompt:      prompt,
+		PromptKind:  "error",
 	}
 	if info != nil {
 		payload.Version = info.Version
 	}
 	m.app.Event.Emit(EventError, payload)
+}
+
+func stateMessage(state State, message string) (string, []string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", nil
+	}
+	if strings.Contains(message, "自动更新已禁用") {
+		return "update.disabled_restart", nil
+	}
+	if strings.Contains(message, "当前已是最新版本") {
+		return "update.latest", []string{buildinfo.CurrentVersion()}
+	}
+	if strings.HasPrefix(message, "当前正在") {
+		return "update.busy." + string(state), nil
+	}
+	return "update.status", []string{message}
 }
 
 func (m *Manager) setState(state State, info *UpdateInfo, archivePath string) {

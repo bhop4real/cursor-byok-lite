@@ -248,24 +248,25 @@ func subagentModelOverrideSummaries(overrides map[string]runtimecore.SubagentMod
 }
 
 type Service struct {
-	store              *ConversationFileStore
-	usageStore         *UsageFileStore
-	codebaseIndexStore *CodebaseIndexStore
-	docsIndexStore     *DocsIndexStore
-	rules              *UserRuleStore
-	projector          *HistoryProjector
-	compiler           PromptCompiler
-	provider           ProviderGateway
-	resolver           modeladapter.ChannelResolver
-	modelMemory        agentModelMemory
-	broker             *StreamBroker
-	recorder           *artifactRecorder
-	debug              *debugRecorder
-	execBridge         execbridge.ExecBridge
-	interactionBridge  interactionbridge.InteractionBridge
-	appendSeq          *appendSequenceTracker
-	providerWorkers    sync.WaitGroup
-	closeOnce          sync.Once
+	store                    *ConversationFileStore
+	usageStore               *UsageFileStore
+	codebaseIndexStore       *CodebaseIndexStore
+	docsIndexStore           *DocsIndexStore
+	rules                    *UserRuleStore
+	projector                *HistoryProjector
+	compiler                 PromptCompiler
+	provider                 ProviderGateway
+	resolver                 modeladapter.ChannelResolver
+	modelMemory              agentModelMemory
+	compactContextEnrollment CompactContextToolsEnrollmentSource
+	broker                   *StreamBroker
+	recorder                 *artifactRecorder
+	debug                    *debugRecorder
+	execBridge               execbridge.ExecBridge
+	interactionBridge        interactionbridge.InteractionBridge
+	appendSeq                *appendSequenceTracker
+	providerWorkers          sync.WaitGroup
+	closeOnce                sync.Once
 }
 
 type agentModelMemory interface {
@@ -1305,7 +1306,29 @@ func (service *Service) handleMetadataIntent(intent InboundIntent) error {
 	return nil
 }
 
-func (service *Service) scheduleProviderResume(stream *ActiveStream, _ int) error {
+func (service *Service) scheduleProviderResume(stream *ActiveStream, providerPass int) error {
+	if stream == nil {
+		return nil
+	}
+	stream.mu.Lock()
+	currentPass := stream.ProviderPassCount
+	modelCallID := strings.TrimSpace(stream.CurrentModelCallID)
+	requestID := strings.TrimSpace(stream.RequestID)
+	conversationID := strings.TrimSpace(stream.ConversationID)
+	stream.mu.Unlock()
+	if providerPass > 0 && currentPass != providerPass {
+		service.debug.LogRuntime(context.Background(), requestID, conversationID, "stale_provider_resume_ignored", map[string]any{
+			"origin_provider_pass":  providerPass,
+			"current_provider_pass": currentPass,
+			"model_call_id":         modelCallID,
+		})
+		return nil
+	}
+	service.debug.LogRuntime(context.Background(), requestID, conversationID, "provider_resume_requested", map[string]any{
+		"origin_provider_pass":  providerPass,
+		"current_provider_pass": currentPass,
+		"model_call_id":         modelCallID,
+	})
 	return service.requestProviderAction(stream, providerActionResume)
 }
 
@@ -1390,8 +1413,11 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 		return service.failStream(stream, "unknown", err)
 	}
 	compiled = guardCompiledConversationForProvider(compiled)
-	compiled = applyProviderToolCapabilities(compiled, snapshotStreamToolCapabilities(stream))
-	if compacted, compactErr := service.maybeCompactBeforeProvider(stream, conversation, compiled); compactErr != nil {
+	toolCapabilities := snapshotStreamToolCapabilities(stream)
+	compiled = applyProviderToolCapabilities(compiled, toolCapabilities)
+	providerCompiled := compileProviderEffectiveConversation(service.compiler, compiled, conversation, mode, latestUserText, modelName, toolCapabilities)
+	rememberProviderContextMeasurement(stream, modelCallID, compiled, providerCompiled)
+	if compacted, compactErr := service.maybeCompactBeforeProvider(stream, conversation, providerCompiled); compactErr != nil {
 		service.setTurnPhase(stream, TurnPhaseFailed)
 		return service.failStream(stream, "unknown", compactErr)
 	} else if compacted {
@@ -1423,7 +1449,7 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 		service.setTurnPhase(stream, TurnPhaseFailed)
 		return service.failStream(stream, "unknown", err)
 	}
-	maxTokens, requestKnobs := service.resolveProviderOutputBudget(modelID, conversation, compiled)
+	maxTokens, requestKnobs := service.resolveProviderOutputBudget(modelID, conversation, providerCompiled)
 	service.maybeSaveLastAgentModelHash(conversation, modelID, mode, currentPass)
 	ctx, cancel := context.WithCancel(profileContext)
 	stream.mu.Lock()
@@ -1439,14 +1465,14 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 		RunID:               requestID,
 		ModelCallID:         modelCallID,
 		ModelID:             modelID,
-		Mode:                compiled.Mode,
-		ThinkingEffort:      compiled.Mode.String(),
-		Messages:            compiled.Messages,
-		StableMessageCount:  compiled.StableMessageCount,
-		Tools:               compiled.Tools,
+		Mode:                providerCompiled.Mode,
+		ThinkingEffort:      providerCompiled.Mode.String(),
+		Messages:            providerCompiled.Messages,
+		StableMessageCount:  providerCompiled.StableMessageCount,
+		Tools:               providerCompiled.Tools,
 		MaxTokens:           maxTokens,
 		RequestKnobs:        requestKnobs,
-		CompileSummary:      compiled.CompileSummary,
+		CompileSummary:      providerCompiled.CompileSummary,
 		Observer:            service.recorder,
 		RawResponseObserver: service.rawProviderObserver(context.Background()),
 		ArtifactPaths:       &modeladapter.LLMArtifactPaths{},
@@ -1457,13 +1483,14 @@ func (service *Service) driveProvider(stream *ActiveStream) error {
 		"provider_pass":          currentPass,
 		"model_id":               strings.TrimSpace(modelID),
 		"model_name":             strings.TrimSpace(modelName),
-		"mode":                   compiled.Mode.String(),
+		"mode":                   providerCompiled.Mode.String(),
+		"prompt_profile":         normalizedPromptProfile(providerCompiled.PromptProfile),
 		"thinking_effort":        strings.TrimSpace(thinkingEffort),
 		"max_tokens":             maxTokens,
 		"request_knobs":          requestKnobs,
-		"message_count":          len(compiled.Messages),
-		"tool_count":             len(compiled.Tools),
-		"compile_summary_length": len(compiled.CompileSummary),
+		"message_count":          len(providerCompiled.Messages),
+		"tool_count":             len(providerCompiled.Tools),
+		"compile_summary_length": len(providerCompiled.CompileSummary),
 	})
 	service.providerWorkers.Add(1)
 	go func() {
@@ -2288,8 +2315,12 @@ func (service *Service) rewriteCheckpointTokenDetailsForClient(stream *ActiveStr
 		state.TokenDetails = &agentv1.ConversationTokenDetails{}
 	}
 	state.TokenDetails.MaxTokens = clampInt64ToUint32(service.checkpointDisplayMaxTokens(stream, conversation))
-	state.TokenDetails.UsedTokens = clampInt64ToUint32(service.checkpointDisplayUsedTokens(conversation, state, compiled, hasCompiled))
+	usedTokens, providerAuthoritative := service.checkpointDisplayUsedTokens(stream, conversation, state, compiled, hasCompiled)
+	state.TokenDetails.UsedTokens = clampInt64ToUint32(usedTokens)
 	state.TokenDetails.Breakdown = estimateCheckpointPromptTokenBreakdown(compiled, hasCompiled, state.TokenDetails.UsedTokens, state.TokenDetails.MaxTokens)
+	if providerAuthoritative && state.TokenDetails.Breakdown != nil {
+		state.TokenDetails.Breakdown.TotalUsedTokens = state.TokenDetails.UsedTokens
+	}
 }
 
 func (service *Service) checkpointCompiledConversation(stream *ActiveStream, conversation *ConversationFile, replayMessages []modeladapter.Message) (CompiledConversation, bool) {
@@ -2297,9 +2328,16 @@ func (service *Service) checkpointCompiledConversation(stream *ActiveStream, con
 		return CompiledConversation{}, false
 	}
 	_, modelName, latestUserText, mode := checkpointPromptContext(stream)
+	toolCapabilities := snapshotStreamToolCapabilities(stream)
 	var compiled CompiledConversation
 	var err error
-	if compiler, ok := service.compiler.(replayPromptCompiler); ok {
+	providerEffective := false
+	if compiler, ok := service.compiler.(interface {
+		CompileProviderProjectionWithReplay(*ConversationFile, agentv1.AgentMode, string, string, []modeladapter.Message, MCPToolCapabilities) (CompiledConversation, error)
+	}); ok {
+		compiled, err = compiler.CompileProviderProjectionWithReplay(conversation, mode, latestUserText, modelName, replayMessages, toolCapabilities)
+		providerEffective = true
+	} else if compiler, ok := service.compiler.(replayPromptCompiler); ok {
 		compiled, err = compiler.CompileWithReplay(conversation, mode, latestUserText, modelName, replayMessages)
 	} else {
 		compiled, err = service.compiler.Compile(conversation, mode, latestUserText, modelName)
@@ -2308,8 +2346,10 @@ func (service *Service) checkpointCompiledConversation(stream *ActiveStream, con
 		log.Printf("forwarder checkpoint token estimate failed request_id=%s conversation_id=%s err=%v", strings.TrimSpace(activeStreamRequestID(stream)), strings.TrimSpace(conversation.ConversationID), err)
 		return CompiledConversation{}, false
 	}
-	compiled = guardCompiledConversationForProvider(compiled)
-	compiled = applyProviderToolCapabilities(compiled, snapshotStreamToolCapabilities(stream))
+	if !providerEffective {
+		compiled = guardCompiledConversationForProvider(compiled)
+		compiled = applyProviderToolCapabilities(compiled, toolCapabilities)
+	}
 	return compiled, true
 }
 
@@ -2322,7 +2362,14 @@ func (service *Service) checkpointDisplayMaxTokens(stream *ActiveStream, convers
 	return maxTokens
 }
 
-func (service *Service) checkpointDisplayUsedTokens(conversation *ConversationFile, state *agentv1.ConversationStateStructure, compiled CompiledConversation, hasCompiled bool) int64 {
+func (service *Service) checkpointDisplayUsedTokens(stream *ActiveStream, conversation *ConversationFile, state *agentv1.ConversationStateStructure, compiled CompiledConversation, hasCompiled bool) (int64, bool) {
+	if hasCompiled && compiled.ProviderProjectionApplied {
+		if measurement, matches := matchingProviderContextMeasurement(stream, compiled); matches && measurement.ReportedPromptTokens > 0 {
+			return measurement.ReportedPromptTokens, true
+		}
+		return estimateCompiledPromptTokens(compiled), true
+	}
+
 	usedTokens := int64(0)
 	if state != nil && state.TokenDetails != nil {
 		usedTokens = int64(state.TokenDetails.GetUsedTokens())
@@ -2335,7 +2382,7 @@ func (service *Service) checkpointDisplayUsedTokens(conversation *ConversationFi
 			usedTokens = estimatedTokens
 		}
 	}
-	return usedTokens
+	return usedTokens, false
 }
 
 func checkpointPromptContext(stream *ActiveStream) (string, string, string, agentv1.AgentMode) {

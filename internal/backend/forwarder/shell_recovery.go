@@ -9,7 +9,10 @@ import (
 	runtimecore "cursor/internal/backend/agent/core"
 )
 
-const shellTerminalRecoveryGrace = 1500 * time.Millisecond
+const (
+	shellTerminalRecoveryGrace = 1500 * time.Millisecond
+	shellMaxForegroundWait     = 30 * time.Second
+)
 
 const (
 	shellRecoveryReasonForegroundDeadline = "foreground_deadline_exceeded"
@@ -34,17 +37,20 @@ func initializePendingExecForTracking(pending runtimecore.PendingExec) runtimeco
 }
 
 func shellForegroundTimeoutDuration(argsJSON []byte) time.Duration {
-	timeoutMS := int64(30000)
+	timeout := shellMaxForegroundWait
 	args, err := runtimecore.DecodeArgsMap(argsJSON)
 	if err == nil {
 		if blockUntilMS, found, err := runtimecore.ReadFloat64Arg(args, "block_until_ms", "blockUntilMS"); err == nil && found {
 			if blockUntilMS <= 0 {
 				return 0
 			}
-			timeoutMS = int64(blockUntilMS)
+			requested := time.Duration(blockUntilMS) * time.Millisecond
+			if requested < timeout {
+				timeout = requested
+			}
 		}
 	}
-	return time.Duration(timeoutMS) * time.Millisecond
+	return timeout
 }
 
 func shellForegroundTimeoutMS(argsJSON []byte) int64 {

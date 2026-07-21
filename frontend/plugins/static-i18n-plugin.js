@@ -651,6 +651,59 @@ function collectCatalogRecords(rootDir) {
   return records;
 }
 
+function placeholderSignature(message) {
+  return Array.from(String(message || "").matchAll(/\{(\d+)\}/g), (match) => match[1]).join(",");
+}
+
+function validateLocaleMessages(locale, messages, catalogEntries) {
+  const catalogKeys = Object.keys(catalogEntries).sort();
+  const messageKeys = Object.keys(messages).sort();
+  const catalogKeySet = new Set(catalogKeys);
+  const errors = [];
+
+  for (const id of catalogKeys) {
+    const message = messages[id];
+    if (typeof message !== "string" || !message.trim()) {
+      errors.push(`${id}: missing translation`);
+      continue;
+    }
+    if (locale === SOURCE_LANGUAGE && message !== catalogEntries[id].source) {
+      errors.push(`${id}: source locale differs from catalog source`);
+    }
+    const expectedPlaceholders = placeholderSignature(catalogEntries[id].source);
+    const actualPlaceholders = placeholderSignature(message);
+    if (actualPlaceholders !== expectedPlaceholders) {
+      errors.push(`${id}: placeholders ${actualPlaceholders || "none"} != ${expectedPlaceholders || "none"}`);
+    }
+  }
+
+  for (const id of messageKeys) {
+    if (!catalogKeySet.has(id)) {
+      errors.push(`${id}: key is not present in the catalog`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`[static-i18n] Invalid ${locale} locale:\n${errors.map((error) => `- ${error}`).join("\n")}`);
+  }
+}
+
+export function validateCatalogFiles(rootDir) {
+  const catalogPath = path.join(rootDir, "src/i18n/generated/catalog.json");
+  const catalog = readJSONFile(catalogPath, { entries: {} });
+  const catalogEntries = catalog?.entries && typeof catalog.entries === "object" ? catalog.entries : {};
+  if (Object.keys(catalogEntries).length === 0) {
+    throw new Error("[static-i18n] Catalog is empty. Run the locale scan before building.");
+  }
+
+  const localesDir = path.join(rootDir, "src/i18n/locales");
+  for (const locale of SUPPORTED_LOCALES) {
+    const localePath = path.join(localesDir, `${locale}.json`);
+    const messages = readJSONFile(localePath, {});
+    validateLocaleMessages(locale, messages, catalogEntries);
+  }
+}
+
 export function syncCatalogFiles(rootDir) {
   const records = collectCatalogRecords(rootDir);
   const catalog = mergeMessageRecords(records);
@@ -678,11 +731,10 @@ export function staticI18nPlugin() {
       rootDir = config.root;
     },
     buildStart() {
-      if (!shouldScan) {
-        return;
+      if (shouldScan) {
+        syncCatalogFiles(rootDir);
       }
-
-      syncCatalogFiles(rootDir);
+      validateCatalogFiles(rootDir);
     },
     transform(code, id) {
       if (!isSourceFile(id) || isExcludedFile(rootDir, id)) {

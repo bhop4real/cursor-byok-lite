@@ -1031,13 +1031,39 @@ export const appViewState = reactive({
 });
 
 function localizeUpdateMessage(msg) {
-  if (!msg) return "";
-  if (msg.includes("当前已是最新版本")) {
-    const match = msg.match(/v?([0-9]+\.[0-9]+\.[0-9]+)/);
-    const version = match ? match[1] : appState.appVersion || "...";
-    return `当前已是最新版本（v${version}）。`;
+  const code = asString(msg);
+  const version = appState.appVersion || "...";
+  switch (code) {
+    case "update.disabled_restart":
+      return "自动更新已禁用，设置将在下次启动时生效。";
+    case "update.busy.checking":
+      return "当前正在检查更新，请稍后再试。";
+    case "update.busy.downloading":
+      return "当前正在下载更新，请稍后再试。";
+    case "update.busy.installing":
+      return "当前正在安装更新，请稍后再试。";
+    case "update.failed":
+      return "更新失败";
+    case "update.latest":
+      return `当前已是最新版本（v${version}）。`;
+    default:
+      break;
   }
-  return msg;
+  if (code.includes("当前已是最新版本")) {
+    const match = code.match(/v?([0-9]+\.[0-9]+\.[0-9]+)/);
+    const legacyVersion = match ? match[1] : version;
+    return `当前已是最新版本（v${legacyVersion}）。`;
+  }
+  return code;
+}
+
+function localizeUpdateError() {
+  const summary = localizeUpdateMessage(appState.updateMessage) || "更新失败";
+  const rawDetails = asString(appState.updateError);
+  if (!rawDetails || rawDetails === summary) {
+    return summary;
+  }
+  return `${summary}\n\n详细信息：${rawDetails}`;
 }
 
 function localizeReadyContent() {
@@ -1076,9 +1102,9 @@ export const updateViewState = reactive({
       case "ready":
         return localizeReadyContent();
       case "error":
-        return appState.updateError || localizeUpdateMessage(appState.updateMessage) || GENERIC_SERVICE_ERROR;
+        return localizeUpdateError();
       default:
-        return localizeUpdateMessage(appState.updateMessage) || localizeUpdateMessage(`当前已是最新版本（v${appState.appVersion || "..."}）。`);
+        return localizeUpdateMessage(appState.updateMessage) || localizeUpdateMessage("update.latest");
     }
   }),
   promptConfirmText: computed(() =>

@@ -142,14 +142,49 @@ func (router *Router) Stream(ctx context.Context, req StreamRequest, sink func(M
 		}
 	}
 
+	var adapter ModelAdapter
 	switch resolved.Provider {
 	case "anthropic":
-		return router.anthropic.Stream(ctx, resolved, sink)
+		adapter = router.anthropic
 	case "openai":
-		return router.openai.Stream(ctx, resolved, sink)
+		adapter = router.openai
 	default:
 		return fmt.Errorf("unsupported provider %q", resolved.Provider)
 	}
+
+	outputEscaped := false
+	observingSink := func(event ModelEvent) error {
+		if event.Kind == ModelEventKindTurnFinished && strings.TrimSpace(event.FinishReason) == "completed_cursor_byok_recovery" {
+			if !outputEscaped {
+				return &ProviderStreamError{
+					Provider:     resolved.Provider,
+					RequestID:    resolved.RequestID,
+					ModelCallID:  resolved.ModelCallID,
+					EventType:    "response.completed",
+					TerminalSeen: false,
+					Retryable:    true,
+					Cause:        fmt.Errorf("unexpected EOF before independently streamed output"),
+				}
+			}
+			event.FinishReason = "completed"
+		}
+		if isSemanticModelEvent(event) {
+			outputEscaped = true
+		}
+		return sink(event)
+	}
+	err = adapter.Stream(ctx, resolved, observingSink)
+	classified := classifyProviderStreamFailure(err, resolved.Provider, resolved.RequestID, resolved.ModelCallID, outputEscaped)
+	if !shouldRetryProviderStream(classified) {
+		return classified
+	}
+
+	// A second request is safe only while the first attempt is still invisible to
+	// the model/tool protocol. Once any semantic event escapes, the caller-owned
+	// reconnect path must decide how to continue.
+	outputEscaped = false
+	err = adapter.Stream(ctx, resolved, observingSink)
+	return classifyProviderStreamFailure(err, resolved.Provider, resolved.RequestID, resolved.ModelCallID, outputEscaped)
 }
 
 // sanitizeProviderMessages removes replay-only placeholders and trims trailing

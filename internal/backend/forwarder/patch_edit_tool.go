@@ -192,7 +192,11 @@ func (service *Service) startHiddenPatchEditRead(stream *ActiveStream, toolCallI
 	if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
 		return err
 	}
-	return service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage})
+	if err := service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage}); err != nil {
+		return err
+	}
+	service.scheduleHiddenEditStageDeadline(stream, pendingExec, hiddenEditStageTimeout, "stage_opened")
+	return nil
 }
 
 func (service *Service) startHiddenPatchEditWrite(stream *ActiveStream, toolCallID string, modelCallID string, providerPass int, reasoningContent string, reasoningSignature string, reasoningSignatureSource string, payload pendingPatchEditPayload, beforeContent string) error {
@@ -245,7 +249,11 @@ func (service *Service) startHiddenPatchEditWrite(stream *ActiveStream, toolCall
 	if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
 		return err
 	}
-	return service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage})
+	if err := service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage}); err != nil {
+		return err
+	}
+	service.scheduleHiddenEditStageDeadline(stream, pendingExec, hiddenEditStageTimeout, "stage_opened")
+	return nil
 }
 
 func (service *Service) startHiddenPatchEditPostRead(stream *ActiveStream, toolCallID string, modelCallID string, providerPass int, reasoningContent string, reasoningSignature string, reasoningSignatureSource string, payload pendingPatchEditPayload) error {
@@ -282,7 +290,11 @@ func (service *Service) startHiddenPatchEditPostRead(stream *ActiveStream, toolC
 	if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
 		return err
 	}
-	return service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage})
+	if err := service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage}); err != nil {
+		return err
+	}
+	service.scheduleHiddenEditStageDeadline(stream, pendingExec, hiddenEditStageTimeout, "stage_opened")
+	return nil
 }
 
 func (service *Service) handleHiddenPatchEditExecResult(stream *ActiveStream, pending runtimecore.PendingExec, message *agentv1.ExecClientMessage) error {
@@ -293,6 +305,7 @@ func (service *Service) handleHiddenPatchEditExecResult(stream *ActiveStream, pe
 	if err != nil {
 		return err
 	}
+	service.completeHiddenEditStageObservation(stream, pending, fmt.Sprintf("%T", message.GetMessage()))
 
 	switch strings.TrimSpace(pending.ExecKind) {
 	case patchEditReadExecKindName:
@@ -313,15 +326,17 @@ func (service *Service) handleHiddenPatchEditExecResult(stream *ActiveStream, pe
 		markExecCompleted(stream, pending)
 		writeResult := message.GetWriteResult()
 		if writeResult == nil {
-			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit write result missing"))
+			return service.startHiddenPatchEditPostRead(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, pending.ReasoningSignature, pending.ReasoningSignatureSource, payload)
 		}
 		switch item := writeResult.GetResult().(type) {
 		case *agentv1.WriteResult_Success:
 			payload.ResolvedPath = firstNonEmpty(strings.TrimSpace(item.Success.GetPath()), strings.TrimSpace(payload.ResolvedPath), strings.TrimSpace(patchEditPayloadPath(payload)))
-			if item.Success.GetFileContentAfterWrite() != "" {
-				finalAfterContent, reconciled, ok := service.reconcilePatchEditObservedContent(stream, pending.ToolCallID, payload.ResolvedPath, payload.AfterContent, item.Success.GetFileContentAfterWrite())
+			setPatchEditPayloadPath(&payload, payload.ResolvedPath)
+			observed := item.Success.GetFileContentAfterWrite()
+			if observed != "" {
+				finalAfterContent, reconciled, ok := service.reconcilePatchEditObservedContent(stream, pending.ToolCallID, payload.ResolvedPath, payload.AfterContent, observed)
 				if !ok {
-					return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit write verification failed: observed file content differs from expected content"))
+					return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit applied, but client verification content differs from expected content"))
 				}
 				if finalAfterContent != payload.AfterContent {
 					payload.DiffString, payload.LinesAdded, payload.LinesRemoved = computeEditDiff(payload.BeforeContent, finalAfterContent)
@@ -330,9 +345,11 @@ func (service *Service) handleHiddenPatchEditExecResult(stream *ActiveStream, pe
 				if reconciled {
 					payload.Message = appendPatchEditMessage(payload.Message, "write result matched after client line-ending normalization")
 				}
+				return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildFinalEditSuccessResult(payload.ResolvedPath, payload.AfterContent, patchEditPayloadAsEditPayload(payload)))
 			}
-			setPatchEditPayloadPath(&payload, payload.ResolvedPath)
-			return service.startHiddenPatchEditPostRead(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, pending.ReasoningSignature, pending.ReasoningSignatureSource, payload)
+			result := buildFinalEditSuccessResult(payload.ResolvedPath, payload.AfterContent, patchEditPayloadAsEditPayload(payload))
+			appendEditResultWarning(result, "patch edit applied; client did not provide inline verification content")
+			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, result)
 		default:
 			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditResultFromWriteResult(payload.ResolvedPath, writeResult))
 		}
@@ -340,23 +357,26 @@ func (service *Service) handleHiddenPatchEditExecResult(stream *ActiveStream, pe
 		markExecCompleted(stream, pending)
 		readResult := message.GetReadResult()
 		if readResult == nil {
-			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildFinalEditSuccessResult(payload.ResolvedPath, payload.AfterContent, patchEditPayloadAsEditPayload(payload)))
+			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit write result was lost and read-back returned no result; commit state is unknown"))
 		}
-		if content, ok := extractReadContentForEdit(readResult); ok {
-			if success := readResult.GetSuccess(); success != nil {
-				payload.ResolvedPath = firstNonEmpty(strings.TrimSpace(success.GetPath()), payload.ResolvedPath)
-				setPatchEditPayloadPath(&payload, payload.ResolvedPath)
-			}
-			finalAfterContent, reconciled, ok := service.reconcilePatchEditObservedContent(stream, pending.ToolCallID, payload.ResolvedPath, payload.AfterContent, content)
-			if !ok {
-				return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit post-read verification failed: observed file content differs from expected content"))
-			}
-			if reconciled {
-				payload.Message = appendPatchEditMessage(payload.Message, "post-read matched after client line-ending normalization")
-			}
-			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildFinalEditSuccessResult(payload.ResolvedPath, finalAfterContent, patchEditPayloadAsEditPayload(payload)))
+		content, ok := extractReadContentForEdit(readResult)
+		if !ok {
+			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit write result was lost and read-back failed; commit state is unknown"))
 		}
-		return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildFinalEditSuccessResult(payload.ResolvedPath, payload.AfterContent, patchEditPayloadAsEditPayload(payload)))
+		if success := readResult.GetSuccess(); success != nil {
+			payload.ResolvedPath = firstNonEmpty(strings.TrimSpace(success.GetPath()), payload.ResolvedPath)
+			setPatchEditPayloadPath(&payload, payload.ResolvedPath)
+		}
+		finalAfterContent, reconciled, ok := service.reconcilePatchEditObservedContent(stream, pending.ToolCallID, payload.ResolvedPath, payload.AfterContent, content)
+		if !ok {
+			return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit write result was lost and observed content differs from expected content; commit state is unknown"))
+		}
+		if reconciled {
+			payload.Message = appendPatchEditMessage(payload.Message, "read-back matched after client line-ending normalization")
+		}
+		result := buildFinalEditSuccessResult(payload.ResolvedPath, finalAfterContent, patchEditPayloadAsEditPayload(payload))
+		appendEditResultWarning(result, "patch edit write result was lost; expected content was verified by read-back")
+		return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, result)
 	default:
 		return fmt.Errorf("unsupported hidden patch edit exec kind: %s", pending.ExecKind)
 	}
@@ -366,21 +386,23 @@ func (service *Service) handleHiddenPatchEditExecControl(stream *ActiveStream, p
 	if stream == nil || message == nil {
 		return fmt.Errorf("patch edit exec control requires stream and message")
 	}
-	if _, ok := message.GetMessage().(*agentv1.ExecClientControlMessage_Heartbeat); ok {
-		return nil
-	}
-	if _, ok := message.GetMessage().(*agentv1.ExecClientControlMessage_StreamClose); ok {
+	if service.observeHiddenEditControl(stream, pending, message) {
 		return nil
 	}
 	payload, err := decodePendingPatchEditPayload(pending.ArgsJSON)
 	if err != nil {
 		return err
 	}
+	service.completeHiddenEditStageObservation(stream, pending, fmt.Sprintf("%T", message.GetMessage()))
 	markExecCompleted(stream, pending)
-	if strings.TrimSpace(pending.ExecKind) == patchEditPostReadExecKindName {
-		return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildFinalEditSuccessResult(payload.ResolvedPath, payload.AfterContent, patchEditPayloadAsEditPayload(payload)))
+	switch strings.TrimSpace(pending.ExecKind) {
+	case patchEditWriteExecKindName:
+		return service.startHiddenPatchEditPostRead(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, pending.ReasoningSignature, pending.ReasoningSignatureSource, payload)
+	case patchEditPostReadExecKindName:
+		return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, "patch edit write result was lost and read-back verification failed; commit state is unknown"))
+	default:
+		return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, hiddenPatchEditControlError(message)))
 	}
-	return service.finishPatchEditOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload, buildEditErrorResult(payload.ResolvedPath, hiddenPatchEditControlError(message)))
 }
 
 func (service *Service) finishPatchEditOperation(stream *ActiveStream, toolCallID string, modelCallID string, providerPass int, reasoningContent string, payload pendingPatchEditPayload, result *agentv1.EditResult) error {

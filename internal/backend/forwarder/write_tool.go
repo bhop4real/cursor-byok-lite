@@ -120,7 +120,11 @@ func (service *Service) startHiddenWriteRead(stream *ActiveStream, toolCallID st
 	if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
 		return err
 	}
-	return service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage})
+	if err := service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage}); err != nil {
+		return err
+	}
+	service.scheduleHiddenEditStageDeadline(stream, pendingExec, hiddenEditStageTimeout, "stage_opened")
+	return nil
 }
 
 func (service *Service) startHiddenWriteExec(stream *ActiveStream, toolCallID string, modelCallID string, providerPass int, reasoningContent string, reasoningSignature string, reasoningSignatureSource string, payload pendingWritePayload, beforeContent string) error {
@@ -163,7 +167,11 @@ func (service *Service) startHiddenWriteExec(stream *ActiveStream, toolCallID st
 	if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
 		return err
 	}
-	return service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage})
+	if err := service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage}); err != nil {
+		return err
+	}
+	service.scheduleHiddenEditStageDeadline(stream, pendingExec, hiddenEditStageTimeout, "stage_opened")
+	return nil
 }
 
 func (service *Service) startHiddenWritePostRead(stream *ActiveStream, toolCallID string, modelCallID string, providerPass int, reasoningContent string, reasoningSignature string, reasoningSignatureSource string, payload pendingWritePayload) error {
@@ -202,7 +210,11 @@ func (service *Service) startHiddenWritePostRead(stream *ActiveStream, toolCallI
 	if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
 		return err
 	}
-	return service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage})
+	if err := service.broker.Publish(stream.RequestID, StreamEvent{Message: serverMessage}); err != nil {
+		return err
+	}
+	service.scheduleHiddenEditStageDeadline(stream, pendingExec, hiddenEditStageTimeout, "stage_opened")
+	return nil
 }
 
 func (service *Service) handleHiddenWriteExecResult(stream *ActiveStream, pending runtimecore.PendingExec, message *agentv1.ExecClientMessage) error {
@@ -213,6 +225,7 @@ func (service *Service) handleHiddenWriteExecResult(stream *ActiveStream, pendin
 	if err != nil {
 		return err
 	}
+	service.completeHiddenEditStageObservation(stream, pending, fmt.Sprintf("%T", message.GetMessage()))
 
 	switch strings.TrimSpace(pending.ExecKind) {
 	case writeReadExecKind:
@@ -235,16 +248,22 @@ func (service *Service) handleHiddenWriteExecResult(stream *ActiveStream, pendin
 		markExecCompleted(stream, pending)
 		writeResult := message.GetWriteResult()
 		if writeResult == nil {
-			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildEditErrorResult(payload.ResolvedPath, "write result missing"))
+			return service.startHiddenWritePostRead(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, pending.ReasoningSignature, pending.ReasoningSignatureSource, payload)
 		}
 		switch item := writeResult.GetResult().(type) {
 		case *agentv1.WriteResult_Success:
 			payload.ResolvedPath = firstNonEmpty(strings.TrimSpace(item.Success.GetPath()), strings.TrimSpace(payload.ResolvedPath), strings.TrimSpace(payload.VisibleArgs.Path))
-			if item.Success.GetFileContentAfterWrite() != "" {
-				payload.AfterContent, _ = reconcilePostWriteObservedContent(payload.AfterContent, item.Success.GetFileContentAfterWrite())
-			}
 			payload.VisibleArgs.Path = payload.ResolvedPath
-			return service.startHiddenWritePostRead(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, pending.ReasoningSignature, pending.ReasoningSignatureSource, payload)
+			observed := item.Success.GetFileContentAfterWrite()
+			if observed != "" {
+				finalAfterContent, reconciled := reconcilePostWriteObservedContent(payload.AfterContent, observed)
+				if finalAfterContent != payload.AfterContent && !reconciled {
+					return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildEditErrorResult(payload.ResolvedPath, "write applied, but client verification content differs from the requested content"))
+				}
+				payload.AfterContent = finalAfterContent
+				return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildSuccessfulWriteResult(payload.ResolvedPath, payload.BeforeContent, payload.AfterContent))
+			}
+			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, successfulWriteResultWithWarning(payload.ResolvedPath, payload.BeforeContent, payload.AfterContent, "write applied; client did not provide inline verification content"))
 		default:
 			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildEditResultFromWriteResult(payload.ResolvedPath, writeResult))
 		}
@@ -254,16 +273,20 @@ func (service *Service) handleHiddenWriteExecResult(stream *ActiveStream, pendin
 		writeArgs.Path = firstNonEmpty(strings.TrimSpace(payload.ResolvedPath), strings.TrimSpace(writeArgs.Path))
 		readResult := message.GetReadResult()
 		if readResult == nil {
-			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, buildSuccessfulWriteResult(writeArgs.Path, payload.BeforeContent, payload.AfterContent))
+			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, buildEditErrorResult(writeArgs.Path, "write result was lost and read-back verification returned no result; commit state is unknown"))
 		}
-		if content, ok := extractReadContentForEdit(readResult); ok {
-			if success := readResult.GetSuccess(); success != nil {
-				writeArgs.Path = firstNonEmpty(strings.TrimSpace(success.GetPath()), writeArgs.Path)
-			}
-			finalAfterContent, _ := reconcilePostWriteObservedContent(payload.AfterContent, content)
-			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, buildSuccessfulWriteResult(writeArgs.Path, payload.BeforeContent, finalAfterContent))
+		content, ok := extractReadContentForEdit(readResult)
+		if !ok {
+			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, buildEditErrorResult(writeArgs.Path, "write result was lost and read-back verification failed; commit state is unknown"))
 		}
-		return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, buildSuccessfulWriteResult(writeArgs.Path, payload.BeforeContent, payload.AfterContent))
+		if success := readResult.GetSuccess(); success != nil {
+			writeArgs.Path = firstNonEmpty(strings.TrimSpace(success.GetPath()), writeArgs.Path)
+		}
+		finalAfterContent, reconciled := reconcilePostWriteObservedContent(payload.AfterContent, content)
+		if finalAfterContent != payload.AfterContent && !reconciled {
+			return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, buildEditErrorResult(writeArgs.Path, "write result was lost and observed content differs from the requested content; commit state is unknown"))
+		}
+		return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, writeArgs, successfulWriteResultWithWarning(writeArgs.Path, payload.BeforeContent, finalAfterContent, "write result was lost; requested content was verified by read-back"))
 	default:
 		return fmt.Errorf("unsupported hidden write exec kind: %s", pending.ExecKind)
 	}
@@ -273,21 +296,23 @@ func (service *Service) handleHiddenWriteExecControl(stream *ActiveStream, pendi
 	if stream == nil || message == nil {
 		return fmt.Errorf("write exec control requires stream and message")
 	}
-	if _, ok := message.GetMessage().(*agentv1.ExecClientControlMessage_Heartbeat); ok {
-		return nil
-	}
-	if _, ok := message.GetMessage().(*agentv1.ExecClientControlMessage_StreamClose); ok {
+	if service.observeHiddenEditControl(stream, pending, message) {
 		return nil
 	}
 	payload, err := decodePendingWritePayload(pending.ArgsJSON)
 	if err != nil {
 		return err
 	}
+	service.completeHiddenEditStageObservation(stream, pending, fmt.Sprintf("%T", message.GetMessage()))
 	markExecCompleted(stream, pending)
-	if strings.TrimSpace(pending.ExecKind) == writePostReadExecKind {
-		return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildSuccessfulWriteResult(payload.ResolvedPath, payload.BeforeContent, payload.AfterContent))
+	switch strings.TrimSpace(pending.ExecKind) {
+	case writeWriteExecKind:
+		return service.startHiddenWritePostRead(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, pending.ReasoningSignature, pending.ReasoningSignatureSource, payload)
+	case writePostReadExecKind:
+		return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildEditErrorResult(payload.ResolvedPath, "write result was lost and read-back verification failed; commit state is unknown"))
+	default:
+		return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildEditErrorResult(payload.ResolvedPath, hiddenWriteControlError(message)))
 	}
-	return service.finishWriteOperation(stream, pending.ToolCallID, pending.ModelCallID, pending.ProviderPass, pending.ReasoningContent, payload.VisibleArgs, buildEditErrorResult(payload.ResolvedPath, hiddenWriteControlError(message)))
 }
 
 func (service *Service) finishWriteOperation(stream *ActiveStream, toolCallID string, modelCallID string, providerPass int, reasoningContent string, writeArgs writeOperationArgs, result *agentv1.EditResult) error {

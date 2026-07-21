@@ -155,13 +155,23 @@ func (service *Service) buildAutoCompactionPlan(stream *ActiveStream, conversati
 		reserveTokens = compactionAutoReserveTokens
 	}
 	budgetTokens := contextWindowSize - reserveTokens
-	preflightExceeded := estimatedCompiledTokens > 0 && estimatedCompiledTokens > budgetTokens
-	contextTokens := maxPositiveInt64(
-		conversation.AutoCompactionPromptTokens,
-		estimatedCompiledTokens,
-		int64(conversation.TokenDetailsUsedTokens),
-	)
-	pendingExceeded := conversation.AutoCompactionPending && contextTokens > 0 && contextTokens > budgetTokens
+	measurement, measurementMatches := matchingProviderContextMeasurement(stream, compiled)
+	providerProjectionDiffers := measurementMatches && measurement.ProviderProjectionDiffs
+	contextTokens := int64(0)
+	if providerProjectionDiffers {
+		contextTokens = estimatedCompiledTokens
+		if measurement.ReportedPromptTokens > 0 {
+			contextTokens = measurement.ReportedPromptTokens
+		}
+	} else {
+		contextTokens = maxPositiveInt64(
+			conversation.AutoCompactionPromptTokens,
+			estimatedCompiledTokens,
+			int64(conversation.TokenDetailsUsedTokens),
+		)
+	}
+	preflightExceeded := contextTokens > 0 && contextTokens > budgetTokens
+	pendingExceeded := !providerProjectionDiffers && conversation.AutoCompactionPending && contextTokens > 0 && contextTokens > budgetTokens
 	if !pendingExceeded && !preflightExceeded {
 		return nil, nil
 	}
@@ -192,7 +202,7 @@ func (service *Service) buildAutoCompactionPlan(stream *ActiveStream, conversati
 			code: compactionOverflowTerminalCode,
 			message: fmt.Sprintf(
 				"compiled prompt exceeds context budget before provider request (estimated=%d budget=%d)",
-				estimatedCompiledTokens,
+				contextTokens,
 				budgetTokens,
 			),
 		}
@@ -591,7 +601,11 @@ func (service *Service) applyCompactionPlan(stream *ActiveStream, conversationID
 	if err != nil {
 		return err
 	}
-	if validationErr := validateCompactionCandidateBudget(recompiled, plan); validationErr != nil {
+	recompiled = guardCompiledConversationForProvider(recompiled)
+	toolCapabilities := snapshotStreamToolCapabilities(stream)
+	recompiled = applyProviderToolCapabilities(recompiled, toolCapabilities)
+	providerRecompiled := compileProviderEffectiveConversation(service.compiler, recompiled, candidateConversation, stream.Mode, latestUserText, stream.ModelName, toolCapabilities)
+	if validationErr := validateCompactionCandidateBudget(providerRecompiled, plan); validationErr != nil {
 		return validationErr
 	}
 	replacementEntries := append([]HistoryEntry(nil), candidateConversation.Entries...)

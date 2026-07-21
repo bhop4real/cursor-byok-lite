@@ -64,8 +64,14 @@ func (store *ConversationFileStore) HistoryDir() string {
 	return store.root
 }
 
-// CreateConversation 确保指定会话对应的 state/context 文件存在并完成元数据初始化。
+// CreateConversation ensures the state/context files exist with the baseline
+// profile. Callers that own brand-new runtime creation use createConversation
+// so the selected immutable profile is written in the same operation.
 func (store *ConversationFileStore) CreateConversation(conversationID string, mode agentv1.AgentMode, parentConversationID string, parentToolCallID string, rootConversationID string) (*ConversationFile, error) {
+	return store.createConversation(conversationID, mode, parentConversationID, parentToolCallID, rootConversationID, PromptProfileBaseline)
+}
+
+func (store *ConversationFileStore) createConversation(conversationID string, mode agentv1.AgentMode, parentConversationID string, parentToolCallID string, rootConversationID string, promptProfile string) (*ConversationFile, error) {
 	if store == nil {
 		return nil, fmt.Errorf("conversation file store is nil")
 	}
@@ -112,6 +118,7 @@ func (store *ConversationFileStore) CreateConversation(conversationID string, mo
 		ParentConversationID: strings.TrimSpace(parentConversationID),
 		ParentToolCallID:     strings.TrimSpace(parentToolCallID),
 		Mode:                 alias,
+		PromptProfile:        normalizedPromptProfile(promptProfile),
 		CreatedAt:            now,
 		UpdatedAt:            now,
 		NextTurnSeq:          1,
@@ -164,6 +171,7 @@ func (store *ConversationFileStore) AppendEntries(conversationID string, entries
 			SchemaVersion:      conversationSchemaVersion,
 			ConversationID:     normalizedConversationID,
 			RootConversationID: normalizedConversationID,
+			PromptProfile:      PromptProfileBaseline,
 			NextTurnSeq:        1,
 			NextEntrySeq:       1,
 			Entries:            make([]HistoryEntry, 0, 16),
@@ -268,6 +276,7 @@ func (store *ConversationFileStore) SaveConversationWithEntries(conversationID s
 			SchemaVersion:      conversationSchemaVersion,
 			ConversationID:     normalizedConversationID,
 			RootConversationID: normalizedConversationID,
+			PromptProfile:      PromptProfileBaseline,
 			NextTurnSeq:        1,
 			NextEntrySeq:       1,
 			Entries:            make([]HistoryEntry, 0, len(entries)),
@@ -310,6 +319,7 @@ func (store *ConversationFileStore) UpdateConversationMeta(conversationID string
 			SchemaVersion:      conversationSchemaVersion,
 			ConversationID:     normalizedConversationID,
 			RootConversationID: normalizedConversationID,
+			PromptProfile:      PromptProfileBaseline,
 			NextTurnSeq:        1,
 			NextEntrySeq:       1,
 			CreatedAt:          time.Now().UTC(),
@@ -353,6 +363,7 @@ func (store *ConversationFileStore) ReplaceEntries(conversationID string, entrie
 			SchemaVersion:      conversationSchemaVersion,
 			ConversationID:     normalizedConversationID,
 			RootConversationID: normalizedConversationID,
+			PromptProfile:      PromptProfileBaseline,
 			NextTurnSeq:        1,
 			NextEntrySeq:       1,
 			Entries:            make([]HistoryEntry, 0, len(entries)),
@@ -448,6 +459,7 @@ func (store *ConversationFileStore) mutateConversation(conversationID string, cr
 			SchemaVersion:      conversationSchemaVersion,
 			ConversationID:     normalizedConversationID,
 			RootConversationID: normalizedConversationID,
+			PromptProfile:      PromptProfileBaseline,
 			NextTurnSeq:        1,
 			NextEntrySeq:       1,
 			Entries:            make([]HistoryEntry, 0, 16),
@@ -766,6 +778,16 @@ func mergeConversationMetadata(target *ConversationFile, source *ConversationFil
 	target.SubagentTypeName = strings.TrimSpace(source.SubagentTypeName)
 	if strings.TrimSpace(source.Mode) != "" {
 		target.Mode = strings.TrimSpace(source.Mode)
+	}
+	if len(target.Entries) == 0 &&
+		!source.CreatedAt.IsZero() &&
+		!target.CreatedAt.IsZero() &&
+		source.CreatedAt.Before(target.CreatedAt) {
+		// SaveConversationWithEntries creates this target immediately before
+		// merging the brand-new runtime snapshot. Existing conversations have
+		// matching persisted creation time, so their immutable profile cannot be
+		// changed through this path, including metadata-less legacy state.
+		target.PromptProfile = normalizedPromptProfile(source.PromptProfile)
 	}
 	if strings.TrimSpace(target.ConversationStartPromptContent) == "" && strings.TrimSpace(source.ConversationStartPromptContent) != "" {
 		target.ConversationStartPromptMode = strings.TrimSpace(source.ConversationStartPromptMode)

@@ -19,6 +19,85 @@ const (
 	estimatedTokensPerImagePart        = int64(1024)
 )
 
+type providerContextMeasurement struct {
+	ModelCallID             string
+	CompiledFingerprint     string
+	EstimatedPromptTokens   int64
+	ReportedPromptTokens    int64
+	ProviderProjectionDiffs bool
+}
+
+func compiledConversationFingerprint(compiled CompiledConversation) string {
+	payload, err := json.Marshal(struct {
+		Mode          agentv1.AgentMode      `json:"mode"`
+		PromptProfile string                 `json:"prompt_profile"`
+		Messages      []modeladapter.Message `json:"messages"`
+		Tools         []json.RawMessage      `json:"tools"`
+	}{
+		Mode:          compiled.Mode,
+		PromptProfile: normalizedPromptProfile(compiled.PromptProfile),
+		Messages:      compiled.Messages,
+		Tools:         compiled.Tools,
+	})
+	if err != nil {
+		return ""
+	}
+	return shortSHA256(string(payload))
+}
+
+func providerProjectionDiffers(canonical CompiledConversation, providerCompiled CompiledConversation) bool {
+	canonicalFingerprint := compiledConversationFingerprint(canonical)
+	providerFingerprint := compiledConversationFingerprint(providerCompiled)
+	return canonicalFingerprint != "" && providerFingerprint != "" && canonicalFingerprint != providerFingerprint
+}
+
+func rememberProviderContextMeasurement(stream *ActiveStream, modelCallID string, canonical CompiledConversation, providerCompiled CompiledConversation) {
+	if stream == nil {
+		return
+	}
+	measurement := providerContextMeasurement{
+		ModelCallID:             strings.TrimSpace(modelCallID),
+		CompiledFingerprint:     compiledConversationFingerprint(providerCompiled),
+		EstimatedPromptTokens:   estimateCompiledPromptTokens(providerCompiled),
+		ProviderProjectionDiffs: providerProjectionDiffers(canonical, providerCompiled),
+	}
+	stream.mu.Lock()
+	if stream.ProviderContextMeasurement.CompiledFingerprint == measurement.CompiledFingerprint {
+		measurement.ReportedPromptTokens = stream.ProviderContextMeasurement.ReportedPromptTokens
+	}
+	stream.ProviderContextMeasurement = measurement
+	stream.mu.Unlock()
+}
+
+func rememberProviderReportedPromptTokens(stream *ActiveStream, modelCallID string, usage turnUsageSnapshot) {
+	if stream == nil {
+		return
+	}
+	promptTokens := usage.promptTokensTotal()
+	if promptTokens <= 0 {
+		return
+	}
+	stream.mu.Lock()
+	if strings.TrimSpace(stream.ProviderContextMeasurement.ModelCallID) == strings.TrimSpace(modelCallID) {
+		stream.ProviderContextMeasurement.ReportedPromptTokens = promptTokens
+	}
+	stream.mu.Unlock()
+}
+
+func matchingProviderContextMeasurement(stream *ActiveStream, compiled CompiledConversation) (providerContextMeasurement, bool) {
+	if stream == nil {
+		return providerContextMeasurement{}, false
+	}
+	fingerprint := compiledConversationFingerprint(compiled)
+	if fingerprint == "" {
+		return providerContextMeasurement{}, false
+	}
+	stream.mu.Lock()
+	measurement := stream.ProviderContextMeasurement
+	stream.mu.Unlock()
+	return measurement, measurement.CompiledFingerprint == fingerprint
+}
+
 func estimateCompiledPromptTokens(compiled CompiledConversation) int64 {
 	return estimateModelMessagesTokens(compiled.Messages) + estimateToolDescriptorsTokens(compiled.Tools)
 }

@@ -27,6 +27,7 @@ type ConversationFile struct {
 	ConversationStartPromptPath     string                                `json:"conversation_start_prompt_path,omitempty"`
 	ConversationStartPromptModel    string                                `json:"conversation_start_prompt_model,omitempty"`
 	ConversationStartPromptContent  string                                `json:"conversation_start_prompt_content,omitempty"`
+	PromptProfile                   string                                `json:"prompt_profile,omitempty"`
 	ContextVersion                  int64                                 `json:"context_version,omitempty"`
 	CurrentLoopID                   string                                `json:"current_loop_id,omitempty"`
 	CurrentLoopStatus               string                                `json:"current_loop_status,omitempty"`
@@ -160,10 +161,14 @@ type ActiveStream struct {
 	ProviderAccumulatedReasoningItemID          string
 	ProviderAccumulatedReasoningStatus          string
 	ProviderAccumulatedReasoningSummary         json.RawMessage
+	ProviderStartedAt                           time.Time
+	ProviderFirstEventAt                        time.Time
+	ProviderLastEventAt                         time.Time
 	ProviderSyntheticThinkingStartedAt          time.Time
 	ProviderSyntheticThinkingPublished          bool
 	ProviderFinishReason                        string
 	ProviderUsage                               turnUsageSnapshot
+	ProviderContextMeasurement                  providerContextMeasurement
 	ProviderTerminalToolInvocation              bool
 	InterruptedTurnFinalized                    bool
 	PendingCompaction                           *PendingCompaction
@@ -312,11 +317,15 @@ type PromptContextMessage struct {
 }
 
 type CompiledConversation struct {
-	Mode               agentv1.AgentMode
-	Messages           []modeladapter.Message
-	StableMessageCount int
-	Tools              []json.RawMessage
-	CompileSummary     string
+	Mode                             agentv1.AgentMode
+	PromptProfile                    string
+	Messages                         []modeladapter.Message
+	StableMessageCount               int
+	Tools                            []json.RawMessage
+	CompileSummary                   string
+	ProviderProjectionApplied        bool
+	ProviderProjectionFallback       bool
+	RequiresToolCapabilityProjection bool
 }
 
 type ToolRequestKind string

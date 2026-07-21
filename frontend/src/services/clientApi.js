@@ -20,18 +20,62 @@ import { Call } from "@wailsio/runtime";
 
 const API_LOG_PREFIX = "[clientApi]";
 const PROXY_SERVICE_NAME = "cursor/internal/bridge.ProxyService";
+const REDACTED_LOG_VALUE = "[redacted]";
+
+function isSensitiveLogKey(key) {
+  const normalized = String(key || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return normalized === "key"
+    || normalized === "apikey"
+    || normalized.endsWith("apikey")
+    || normalized.endsWith("token")
+    || normalized.includes("password")
+    || normalized.includes("secret")
+    || normalized.includes("credential")
+    || normalized === "authorization"
+    || normalized === "proxyauthorization"
+    || normalized === "cookie"
+    || normalized === "setcookie"
+    || normalized === "adapterjson"
+    || normalized === "customheadersjson";
+}
+
+function sanitizeLogValue(value, seen = new WeakSet()) {
+  if (value === null || value === undefined || typeof value !== "object") {
+    return value;
+  }
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+    };
+  }
+  if (seen.has(value)) {
+    return "[circular]";
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeLogValue(item, seen));
+  }
+  const sanitized = {};
+  for (const [key, item] of Object.entries(value)) {
+    sanitized[key] = isSensitiveLogKey(key)
+      ? REDACTED_LOG_VALUE
+      : sanitizeLogValue(item, seen);
+  }
+  return sanitized;
+}
 
 function logSuccess(name, payload, result) {
   console.log(`${API_LOG_PREFIX} ${name} response`, {
-    payload,
-    result,
+    payload: sanitizeLogValue(payload),
+    result: sanitizeLogValue(result),
   });
 }
 
 function logError(name, payload, error) {
   console.error(`${API_LOG_PREFIX} ${name} error`, {
-    payload,
-    error,
+    payload: sanitizeLogValue(payload),
+    error: sanitizeLogValue(error),
   });
 }
 
@@ -54,6 +98,18 @@ export function loadUserConfig() {
 
 export function saveUserConfig(payload) {
   return withApiLogging("SaveUserConfig", payload, () => SaveUserConfig(payload));
+}
+
+export function getEditableConfigMetadata() {
+  return withApiLogging("GetEditableConfigMetadata", undefined, () =>
+    Call.ByName(`${PROXY_SERVICE_NAME}.GetEditableConfigMetadata`),
+  );
+}
+
+export function patchUserConfig(payload) {
+  return withApiLogging("PatchUserConfig", payload, () =>
+    Call.ByName(`${PROXY_SERVICE_NAME}.PatchUserConfig`, payload),
+  );
 }
 
 export function getProxyState() {

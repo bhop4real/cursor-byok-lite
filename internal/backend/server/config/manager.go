@@ -75,6 +75,23 @@ func (manager *Manager) Save(ctx context.Context, cfg Config) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	manager.commitSavedConfig(normalized)
+	return normalized, nil
+}
+
+func (manager *Manager) Patch(ctx context.Context, patch ConfigPatch) (Config, error) {
+	if manager == nil || manager.store == nil {
+		return Config{}, fmt.Errorf("config manager is not initialized")
+	}
+	normalized, err := manager.store.Patch(ctx, patch)
+	if err != nil {
+		return Config{}, err
+	}
+	manager.commitSavedConfig(normalized)
+	return normalized, nil
+}
+
+func (manager *Manager) commitSavedConfig(normalized Config) {
 	manager.setCurrent(normalized)
 	manager.reloadMu.Lock()
 	manager.snapshot = manager.store.snapshot()
@@ -82,7 +99,6 @@ func (manager *Manager) Save(ctx context.Context, cfg Config) (Config, error) {
 	manager.reloadError = ""
 	manager.reloadMu.Unlock()
 	manager.notify(normalized)
-	return normalized, nil
 }
 
 func (manager *Manager) LastAgentModelHash() string {
@@ -111,6 +127,15 @@ func (manager *Manager) ResponseLanguage() string {
 		return DefaultResponseLanguage
 	}
 	return normalizeResponseLanguage(manager.Current().ResponseLanguage)
+}
+
+// CompactContextToolsEnabled is sampled only when a conversation is first
+// created. Existing conversations use their persisted prompt profile.
+func (manager *Manager) CompactContextToolsEnabled() bool {
+	if manager == nil {
+		return false
+	}
+	return manager.Current().CompactContextTools
 }
 
 func (manager *Manager) ProviderStreamIdleTimeout(ctx context.Context) time.Duration {
